@@ -8,7 +8,7 @@
     "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 3000",
-    "lint": "eslint src --ext js,jsx"
+    "lint": "eslint ."
   },
   "dependencies": {
     "axios": "^1.7.7",
@@ -19,8 +19,14 @@
     "recharts": "^2.12.7"
   },
   "devDependencies": {
+    "@eslint/js": "^9.13.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
+    "eslint": "^9.13.0",
+    "eslint-plugin-react": "^7.37.1",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "eslint-plugin-react-refresh": "^0.4.13",
+    "globals": "^15.11.0",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
     "vite": "^5.4.8"

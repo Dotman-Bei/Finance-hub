@@ -1,11 +1,14 @@
 # FinanceHub (build.md §13).
 #
-# Phase 0 brings up the three infrastructure services. Each app service block
-# is added as its phase lands — they are listed at the bottom, commented, so
-# the build order stays visible and `docker compose up -d` works today.
+# All phases have landed, so every service block below is active. Blocks stay
+# in build order — infrastructure first, then Subsystems 2, 1, 3, 4 — because
+# `depends_on` mirrors that order and reads top-to-bottom.
 #
-#   docker compose up -d          # postgres + redis + kafka, healthchecked
-#   docker compose ps             # all three should read (healthy)
+#   docker compose up -d --build          # the whole system
+#   docker compose up -d postgres redis kafka   # infrastructure only (§15 dev)
+#   docker compose ps                     # health of each service
+#
+# Dashboard on :3000, reporting gateway on :8000 (OpenAPI at /docs).
 #
 # Postgres applies db/schema.sql automatically on a fresh volume via its
 # entrypoint, so §16's "schema applied" needs no manual step.

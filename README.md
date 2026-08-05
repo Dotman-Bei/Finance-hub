@@ -86,16 +86,33 @@ financehub/
 │       │   └── main.py             # FastAPI, port 8002
 │       ├── models/                 # persisted .pkl (gitignored)
 │       └── tests/                  # test_precision.py, test_latency.py (gates)
-│   └── exception_handler/      # Subsystem 3 (Sec. 10)
+│   └── exception_handler/      # Subsystem 3 (Sec. 10) + feedback loop (Sec. 11)
 │       ├── app/
 │       │   ├── features.py         # the 4 features Sec. 10 names, + corroborating
 │       │   ├── classifier.py       # Random Forest + cold-start bootstrap rules
 │       │   ├── resolution.py       # Sec. 10's category -> pathway table
 │       │   ├── feedback.py         # queue access + human-decision capture
+│       │   ├── retrain.py          # Celery beat task; hot-swaps the .pkl
 │       │   └── main.py             # FastAPI, port 8003
 │       ├── models/                 # rf_classifier.pkl (gitignored)
-│       └── tests/                  # test_classifier.py (gate)
-└── frontend/              # Subsystem 4 UI
+│       └── tests/                  # test_classifier.py, test_feedback.py (gates)
+│   └── reporting_api/          # Subsystem 4 backend (Sec. 12)
+│       ├── app/
+│       │   ├── metrics.py          # KPI + match-rate aggregation, Redis-cached
+│       │   ├── reports.py          # Jinja2 -> ReportLab audit PDFs
+│       │   ├── auth.py             # JWT + the 3 roles of Sec. 3.4.1
+│       │   ├── audit.py            # audittrail reads for the Auditor role
+│       │   ├── ws.py               # WS /ws/exceptions live relay
+│       │   └── main.py             # FastAPI gateway, port 8000
+│       ├── templates/              # report layouts
+│       └── tests/
+├── frontend/              # Subsystem 4 UI — React SPA, port 3000
+│   └── src/
+│       ├── components/         # KpiSummaryCards, MatchRateChart,
+│       │                       # ExceptionPanel, ReportsPanel
+│       ├── hooks/useWebSocket.js   # live exception alerts
+│       └── api/                # Axios client + response normalisation
+└── tests/                 # cross-subsystem: end-to-end, integration (DB)
 ```
 
 ### Cold start
@@ -142,7 +159,14 @@ which §3.3.2's tamper-evidence entirely rests, would go untested everywhere.
 pytest                                    # everything (integration auto-skips)
 pytest -m integration                     # needs `docker compose up -d postgres`
 pytest services/matching_engine/tests/test_latency.py -v    # load + scaling
+
+cd frontend && npm ci && npm run lint && npm run build      # the frontend gate
 ```
+
+The frontend lint config is correctness-only — no stylistic rules, so it never
+reformats. The rule earning its keep is `react-hooks/exhaustive-deps`:
+`useWebSocket.js` holds its callback in a ref to avoid a stale-closure
+reconnect loop, an invariant invisible to review but visible to the linter.
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs each gate as a named
 step, so a red build names the objective it broke rather than reporting one
@@ -171,8 +195,18 @@ those paths may apply it to the same database.
 
 ---
 
-## Adding the next service
+## Running the whole system
 
-Each phase uncomments its block in `docker-compose.yml` and adds
-`services/<name>/` per build.md §3. Ports follow §15: validation 8001,
-matching 8002, exceptions 8003, reporting 8000, frontend 3000.
+```bash
+docker compose up -d --build
+docker compose ps            # every service should read (healthy)
+```
+
+Ports follow build.md §15: validation 8001, matching 8002, exceptions 8003,
+reporting 8000, frontend 3000. The dashboard is on
+[localhost:3000](http://localhost:3000); the reporting gateway serves OpenAPI
+docs at [localhost:8000/docs](http://localhost:8000/docs).
+
+`REQUIRE_AUTH=true` is the compose default. Set it to `false` for local
+development only — it makes every caller a `SYSTEM_ADMINISTRATOR` and logs a
+warning at startup.
