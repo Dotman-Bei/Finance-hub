@@ -1,0 +1,2 @@
+# Persisted .pkl clustering models land here (build.md Sec. 9).
+# Fitted artefacts are gitignored; refit with POST /models/fit.

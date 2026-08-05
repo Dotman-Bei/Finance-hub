@@ -1,0 +1,2 @@
+# Persisted rf_classifier.pkl lands here (build.md Sec. 10).
+# Fitted artefacts are gitignored; train with POST /models/train.

@@ -1,0 +1,12 @@
+# Shared foundation — every service installs this before its own deps.
+# Pinned to the stack named in build.md §2.
+
+pydantic==2.13.4
+pydantic-settings==2.7.1
+SQLAlchemy==2.0.36
+psycopg2-binary==2.9.10
+alembic==1.14.0
+python-dotenv==1.0.1
+
+# Phase 0 verification
+pytest==8.3.4

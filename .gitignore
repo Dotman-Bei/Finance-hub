@@ -1,0 +1,15 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Trained artefacts are rebuilt by their phase, never committed
+services/*/models/*.pkl
+
+node_modules/
+dist/
+.DS_Store

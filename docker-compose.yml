@@ -1,0 +1,211 @@
+# FinanceHub (build.md §13).
+#
+# Phase 0 brings up the three infrastructure services. Each app service block
+# is added as its phase lands — they are listed at the bottom, commented, so
+# the build order stays visible and `docker compose up -d` works today.
+#
+#   docker compose up -d          # postgres + redis + kafka, healthchecked
+#   docker compose ps             # all three should read (healthy)
+#
+# Postgres applies db/schema.sql automatically on a fresh volume via its
+# entrypoint, so §16's "schema applied" needs no manual step.
+
+name: financehub
+
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-financehub}
+      POSTGRES_USER: ${POSTGRES_USER:-financehub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on an empty data directory, in filename order.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-financehub} -d ${POSTGRES_DB:-financehub}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  kafka:
+    image: bitnami/kafka:3.7
+    restart: unless-stopped
+    environment:
+      # KRaft single-node: this container is both controller and broker.
+      KAFKA_CFG_NODE_ID: 0
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Two client listeners: PLAINTEXT for in-network services, EXTERNAL so a
+      # service run on the host during dev (build.md §15) can also reach it.
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - kafkadata:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  # ── Phase 1 — Real-Time Validation Pipeline (build.md §8) ───────────────
+  # Build context is the repo root, not ./services/validation_pipeline as §13
+  # shows: the service imports `shared.*`, which sits outside that directory.
+  validation_pipeline:
+    build:
+      context: .
+      dockerfile: services/validation_pipeline/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the network Postgres/Redis/Kafka resolve by service name.
+      CONSUME_KAFKA: "true"
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis:    {condition: service_healthy}
+      kafka:    {condition: service_healthy}
+    ports: ["8001:8001"]
+
+  # ── Phase 2 — Hybrid Matching Engine (build.md §9) ──────────────────────
+  matching_engine:
+    build:
+      context: .
+      dockerfile: services/matching_engine/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres: {condition: service_healthy}
+      validation_pipeline: {condition: service_started}
+    ports: ["8002:8002"]
+    volumes:
+      # Fitted .pkl models survive a container rebuild; without this every
+      # redeploy would silently fall back to per-batch vocabularies.
+      - matching_models:/srv/services/matching_engine/models
+
+  # ── Phase 3 — Smart Exception Handling (build.md §10) ───────────────────
+  exception_handler:
+    build:
+      context: .
+      dockerfile: services/exception_handler/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis:    {condition: service_healthy}
+      matching_engine: {condition: service_started}
+    ports: ["8003:8003"]
+    volumes:
+      # rf_classifier.pkl must survive a rebuild, or every redeploy silently
+      # reverts triage to the bootstrap rules and discards what humans taught it.
+      - exception_models:/srv/services/exception_handler/models
+
+  # ── Phase 5 — Feedback loop & retraining (build.md §11) ─────────────────
+  # Same image as exception_handler, different command. Both mount the model
+  # volume: the worker writes rf_classifier.pkl and the API hot-swaps it.
+  celery_worker:
+    build:
+      context: .
+      dockerfile: services/exception_handler/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    command:
+      - celery
+      - -A
+      - services.exception_handler.app.retrain
+      - worker
+      - --loglevel=info
+      # Retraining is CPU-bound scikit-learn work; concurrency above 1 on the
+      # same model file buys nothing and risks two writers.
+      - --concurrency=1
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis:    {condition: service_healthy}
+    volumes:
+      - exception_models:/srv/services/exception_handler/models
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: services/exception_handler/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    command:
+      - celery
+      - -A
+      - services.exception_handler.app.retrain
+      - beat
+      - --loglevel=info
+      # The schedule file must live somewhere writable by the unprivileged user.
+      - --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      redis: {condition: service_healthy}
+      celery_worker: {condition: service_started}
+
+  # ── Phase 4 — Reporting API (build.md §12) ──────────────────────────────
+  reporting_api:
+    build:
+      context: .
+      dockerfile: services/reporting_api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LOG_LEVEL: INFO
+      # Where POST /exceptions/{id}/resolve is forwarded (Subsystem 3 owns it).
+      EXCEPTION_HANDLER_URL: http://exception_handler:8003
+      CORS_ORIGINS: http://localhost:3000
+      # Set REQUIRE_AUTH=false only for local development; it makes every
+      # caller a SYSTEM_ADMINISTRATOR and logs a warning at startup.
+      REQUIRE_AUTH: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis:    {condition: service_healthy}
+      exception_handler: {condition: service_started}
+    ports: ["8000:8000"]
+
+  # ── Phase 4 — Dashboard (build.md §12) ──────────────────────────────────
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    depends_on: [reporting_api]
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:
+  matching_models:
+  exception_models:

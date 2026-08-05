@@ -1,0 +1,22 @@
+# Subsystem 2 - Real-Time Validation Pipeline.
+# Installs the shared foundation first, then this service's own stack.
+-r ../../shared/requirements.txt
+
+# REST surface (build.md Sec. 2)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# ETL normalisation
+pandas==2.2.3
+
+# Business-rule data quality (Sec. 8, stage 2)
+great_expectations==1.19.1
+
+# Ingestion backbone (Sec. 2). kafka-python is pure Python, so the image
+# needs no librdkafka toolchain.
+kafka-python==2.0.2
+
+# Validation-result cache + dashboard alert channel (Sec. 8)
+redis==5.2.1
+
+httpx==0.28.1   # FastAPI TestClient

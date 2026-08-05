@@ -1,0 +1,70 @@
+{
+  "name": "transaction_business_rules",
+  "meta": {
+    "great_expectations_version": "1.19.1",
+    "source": "build.md Sec. 8 - 'logical checks beyond structure'",
+    "notes": [
+      "Stage 2 of the validation pipeline. Structural checks belong to stage 1 (Pydantic).",
+      "reference_code is deliberately allowed to be null: a missing reference is a legitimate MISSING_REFERENCE_CODE exception downstream (Sec. 10), not an ingestion failure. GE column-map expectations skip nulls, so the regex only constrains references that are actually present.",
+      "txn_date's max_value is injected at runtime by rule_processor.py - 'not in the future' is relative to now and cannot be frozen into a file."
+    ]
+  },
+  "expectations": [
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": { "column": "amount" },
+      "meta": { "rule": "amount is mandatory" }
+    },
+    {
+      "type": "expect_column_values_to_be_between",
+      "kwargs": { "column": "amount", "min_value": 0.01, "strict_min": false },
+      "meta": { "rule": "build.md Sec. 8 - amount positive" }
+    },
+    {
+      "type": "expect_column_values_to_be_between",
+      "kwargs": { "column": "amount", "max_value": 1000000000.0 },
+      "meta": { "rule": "amount must fit NUMERIC(18,2); anything larger is a feed error" }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": { "column": "txn_date" },
+      "meta": { "rule": "txn_date is mandatory" }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": { "column": "currency" },
+      "meta": { "rule": "currency is mandatory" }
+    },
+    {
+      "type": "expect_column_values_to_be_in_set",
+      "kwargs": {
+        "column": "currency",
+        "value_set": ["USD", "EUR", "GBP", "NGN", "ZAR", "KES", "GHS", "CAD", "AUD", "JPY", "CHF", "CNY"]
+      },
+      "meta": { "rule": "build.md Sec. 8 - currency in an allowed set" }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": { "column": "source_type" },
+      "meta": { "rule": "source_type is mandatory" }
+    },
+    {
+      "type": "expect_column_values_to_be_in_set",
+      "kwargs": {
+        "column": "source_type",
+        "value_set": ["bank_api", "payment_gateway", "erp"]
+      },
+      "meta": { "rule": "db/schema.sql - transactions.source_type comment" }
+    },
+    {
+      "type": "expect_column_values_to_match_regex",
+      "kwargs": { "column": "reference_code", "regex": "^REF-[0-9]{4,10}$" },
+      "meta": { "rule": "build.md Sec. 8 - reference_code matches an approved format; nulls are skipped by design" }
+    },
+    {
+      "type": "expect_column_values_to_match_regex",
+      "kwargs": { "column": "external_id", "regex": "^[A-Za-z0-9_-]{1,64}$" },
+      "meta": { "rule": "external_id must be a safe opaque token when present" }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# Subsystem 4 backend - Reporting API gateway.
+-r ../../shared/requirements.txt
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Audit-ready PDF generation (build.md Sec. 2, Sec. 3.4.2)
+reportlab==4.2.5
+Jinja2==3.1.5
+
+# RBAC via JWT + role claims (Sec. 3.4.1)
+PyJWT==2.10.1
+
+# Dashboard query cache + live event channel (Sec. 12)
+redis==5.2.1
+
+# WebSocket transport for uvicorn, and the proxy to exception_handler
+websockets==14.1
+httpx==0.28.1
+
+pytest-asyncio==0.25.0

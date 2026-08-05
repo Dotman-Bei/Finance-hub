@@ -1,0 +1,156 @@
+# FinanceHub
+
+Automated Financial Transaction Reconciliation and Reporting System.
+Built to [build.md](build%20%281%29.md) — four subsystems over RESTful APIs,
+backed by one PostgreSQL database as the single source of truth.
+
+**No mock data anywhere.** Services read real data from real dependencies or
+fail visibly. Synthetic corpora exist only inside the release-gate tests
+build.md §14 calls for.
+
+---
+
+## Status
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **0** | Schema, shared models, infra | ✅ **done** |
+| **1** | Validation pipeline (Subsystem 2) | ✅ **done** — gate: 100% detection, 0% false positive |
+| **2** | Matching engine (Subsystem 1) | ✅ **done** — gate: 100% precision, 98% coverage, p95 583ms |
+| **3** | Exception handler (Subsystem 3) | ✅ **done** — gate: forest macro F1 1.00, bootstrap 0.89 |
+| **4** | Reporting API (Subsystem 4 backend) | ✅ **done** — RBAC, ReportLab PDFs, live WS relay |
+| **4** | Dashboard (Subsystem 4 UI) | ✅ **done** — mock layer removed, reads the live gateway |
+| **5** | Feedback loop + retraining | ✅ **done** — gate: 0.84 → 1.00 over rolling rounds |
+| 6 | Hardening | ⬜ not started |
+
+---
+
+## Quickstart
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -r shared/requirements.txt   # Windows
+# .venv/bin/python -m pip install -r shared/requirements.txt     # macOS/Linux
+
+cp .env.example .env
+docker compose up -d          # postgres + redis + kafka
+docker compose ps             # all three should read (healthy)
+.venv/Scripts/python -m pytest
+```
+
+Postgres applies [db/schema.sql](db/schema.sql) automatically through its
+entrypoint on a fresh volume, so there is no manual schema step. `make` targets
+wrap all of the above — run `make help`.
+
+---
+
+## Layout
+
+```
+financehub/
+├── docker-compose.yml     # postgres, redis, kafka (healthchecked)
+├── .env.example           # every key build.md §4 defines
+├── db/
+│   ├── schema.sql         # canonical DDL: 6 tables, 5 enums, audit trigger
+│   ├── alembic.ini
+│   └── migrations/        # 0001_baseline replays schema.sql
+├── shared/
+│   ├── config.py          # the one .env loader
+│   ├── db.py              # engine, session_scope, healthcheck
+│   ├── models/
+│   │   ├── enums.py       # mirrors the Postgres types 1:1
+│   │   ├── transaction.py # Pydantic; doubles as the §8 validation schema
+│   │   ├── match_result.py
+│   │   └── orm.py         # SQLAlchemy mappings onto schema.sql
+│   └── tests/
+├── services/
+│   └── validation_pipeline/    # Subsystem 2 (Sec. 8)
+│       ├── app/
+│       │   ├── ingestion.py        # stage 0: Kafka + Pandas CSV/JSON normalisation
+│       │   ├── schema_validator.py # stage 1: Pydantic
+│       │   ├── rule_processor.py   # stage 2: Great Expectations
+│       │   ├── checksum.py         # stage 3: checksum / HMAC
+│       │   ├── quarantine.py       # stage 4: persistence + quarantine + alert
+│       │   ├── pipeline.py         # orchestration (no I/O)
+│       │   ├── cache.py            # Redis fingerprint cache
+│       │   └── main.py             # FastAPI, port 8001
+│       ├── expectations/           # the GE suite, as JSON
+│       └── tests/                  # incl. test_detection_rate.py (release gate)
+│   └── matching_engine/        # Subsystem 1 (Sec. 9)
+│       ├── app/
+│       │   ├── rule_engine.py      # layer 1: exact reference+amount+date
+│       │   ├── ml_model.py         # layer 2: TF-IDF + DBSCAN + LOF + blocking
+│       │   ├── scoring.py          # confidence + configurable threshold
+│       │   ├── pipeline.py         # rule -> ML orchestration (no I/O)
+│       │   ├── persistence.py      # matchedrecords + ledgerentries + exceptions
+│       │   └── main.py             # FastAPI, port 8002
+│       ├── models/                 # persisted .pkl (gitignored)
+│       └── tests/                  # test_precision.py, test_latency.py (gates)
+│   └── exception_handler/      # Subsystem 3 (Sec. 10)
+│       ├── app/
+│       │   ├── features.py         # the 4 features Sec. 10 names, + corroborating
+│       │   ├── classifier.py       # Random Forest + cold-start bootstrap rules
+│       │   ├── resolution.py       # Sec. 10's category -> pathway table
+│       │   ├── feedback.py         # queue access + human-decision capture
+│       │   └── main.py             # FastAPI, port 8003
+│       ├── models/                 # rf_classifier.pkl (gitignored)
+│       └── tests/                  # test_classifier.py (gate)
+└── frontend/              # Subsystem 4 UI
+```
+
+### Cold start
+
+A Random Forest needs labels that do not exist on day one. Rather than ship a
+model fitted on invented data, `classifier.py` serves a **deterministic
+bootstrap rule set** over the same real features until human decisions
+accumulate. Every suggestion records which engine produced it
+(`engine: "bootstrap" | "random_forest"`), so a reviewer can weigh them
+differently and no consumer can mistake a rule for a learned prediction.
+Rejections are never used as training labels — a rejection says the suggestion
+was wrong, not what was right.
+
+### Release gates
+
+| Objective | Gate | Where | Status |
+|---|---|---|---|
+| 2 | >=98% malformed quarantined, 0 valid lost | `validation_pipeline/tests/test_detection_rate.py` | ✅ 100% / 0% |
+| 1 | Match precision vs. labelled ground truth | `matching_engine/tests/test_precision.py` | ✅ 100% precision, 98% coverage |
+| 1 | p95 latency + no superlinear scaling | `matching_engine/tests/test_latency.py` | ✅ 583ms / 600 txns |
+| 3 | Per-category precision/recall, held-out | `exception_handler/tests/test_classifier.py` | ✅ forest 1.00, rules 0.89 |
+| 3 | Accuracy after retraining ≥ before | `exception_handler/tests/test_feedback.py` | ✅ monotonic, 0.84 → 1.00 |
+
+Gate numbers are measured on synthetic corpora (build.md §14 sanctions these
+for tests). They bound what the code can do on data shaped like the
+assumptions; they are not production estimates. The classifier gate is
+deliberately measured on a corpus that is **50% ambiguous cases** — on cleanly
+separable data both engines score 1.00, which measures the corpus rather than
+the classifier.
+
+Run `pytest` to see the measured margins printed, not just pass/fail — including
+the threshold sweep that evidences Sec. 9's false-positive claim.
+
+### Two `Transaction`s
+
+`shared.models.Transaction` is the **Pydantic wire model**;
+`shared.models.orm.Transaction` is the **database row**. `orm` is deliberately
+not re-exported, so `from shared.models import orm` makes the choice explicit
+at every call site.
+
+### Schema is the source of truth
+
+`db/schema.sql` owns the DDL. The ORM maps onto it and never generates it —
+enum columns use `create_type=False`. `shared/tests/test_orm_matches_schema.py`
+parses the SQL and diffs it against the ORM metadata, so drift fails a test
+instead of surfacing at runtime.
+
+`schema.sql` is ASCII-only and re-runnable on purpose: it is piped through
+`psql`, Docker's entrypoint and `alembic upgrade --sql`, and more than one of
+those paths may apply it to the same database.
+
+---
+
+## Adding the next service
+
+Each phase uncomments its block in `docker-compose.yml` and adds
+`services/<name>/` per build.md §3. Ports follow §15: validation 8001,
+matching 8002, exceptions 8003, reporting 8000, frontend 3000.

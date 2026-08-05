@@ -1,0 +1,199 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base ─────────────────────────────────────────────────────────────── */
+@layer base {
+  :root {
+    /* Mirrored by useCursorGradient so CSS can follow the pointer */
+    --cursor-x: 50%;
+    --cursor-y: 30%;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-surface font-sans text-body text-on-surface-variant antialiased;
+    /* Seamless edge finish: the footer paints all the way to the viewport
+       bottom with no white line, even on overscroll. */
+    overscroll-behavior-y: none;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply text-on-surface;
+    text-wrap: balance;
+  }
+
+  /* Native cursors throughout. Buttons don't get a pointer by default, so
+     opt the interactive controls in and mark disabled ones explicitly. */
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  summary,
+  select {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled='true'] {
+    cursor: not-allowed;
+  }
+
+  ::selection {
+    background: rgba(255, 138, 101, 0.28);
+    color: #000;
+  }
+
+  /* Hairline, unobtrusive scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, 0.14) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.14);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid #ff8a65;
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+}
+
+/* ── Components ───────────────────────────────────────────────────────── */
+@layer components {
+  /* Glass pane: low-opacity white + XL backdrop blur + hairline border.
+     No stark containers — depth comes from blur and soft shadow. */
+  .glass {
+    @apply rounded-glass border border-outline-variant/60 bg-surface/70 shadow-glass backdrop-blur-glass;
+  }
+
+  .glass-strong {
+    @apply rounded-pane border border-outline-variant/70 bg-surface/85 shadow-glass-lg backdrop-blur-glass-xl;
+  }
+
+  .glass-quiet {
+    @apply rounded-glass border border-outline-variant/40 bg-surface/50 backdrop-blur-glass;
+  }
+
+  /* Primary CTA — restrained size, warm gradient, soft glow */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-pill bg-grad-warm px-5 py-2.5
+           text-[0.8125rem] font-bold tracking-tight-ui text-white shadow-primary-glow
+           transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_12px_34px_-8px_rgba(255,138,101,0.7)]
+           active:translate-y-0 disabled:pointer-events-none disabled:opacity-45;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-pill border border-outline-variant/70
+           bg-surface/60 px-4 py-2 text-[0.8125rem] font-semibold tracking-tight-ui text-on-surface
+           backdrop-blur-glass transition-all duration-300
+           hover:border-outline hover:bg-surface/90 hover:-translate-y-0.5
+           disabled:pointer-events-none disabled:opacity-45;
+  }
+
+  .btn-quiet {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-pill px-3 py-1.5 text-caption
+           text-on-surface-variant transition-colors duration-200
+           hover:bg-surface-sunken/70 hover:text-on-surface disabled:pointer-events-none disabled:opacity-40;
+  }
+
+  /* Segmented control used for the tabbed glass UI inside cards */
+  .segmented {
+    @apply inline-flex items-center gap-1 rounded-pill border border-outline-variant/50
+           bg-surface-dim/70 p-1 backdrop-blur-glass;
+  }
+
+  .segmented-item {
+    @apply rounded-pill px-3.5 py-1.5 text-caption text-on-surface-variant transition-all duration-300
+           hover:text-on-surface;
+  }
+
+  .segmented-item[data-active='true'] {
+    @apply bg-surface text-on-surface shadow-[0_1px_3px_rgba(16,16,20,0.10)];
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[0.6875rem]
+           font-bold uppercase tracking-[0.06em];
+  }
+
+  .eyebrow {
+    @apply text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-on-surface-variant;
+  }
+
+  /* Loading placeholder that keeps the glass look */
+  .skeleton {
+    @apply relative overflow-hidden rounded-lg bg-surface-sunken/80;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 animate-shimmer bg-gradient-to-r from-transparent via-white/70 to-transparent;
+    content: '';
+    transform: translateX(-100%);
+  }
+}
+
+/* ── Utilities ────────────────────────────────────────────────────────── */
+@layer utilities {
+  .text-gradient-energy {
+    @apply bg-grad-energy bg-clip-text text-transparent;
+  }
+
+  .text-gradient-warm {
+    @apply bg-grad-warm bg-clip-text text-transparent;
+  }
+
+  /* Pale gradient wash that follows the pointer — "living" energy without clutter */
+  .cursor-aura {
+    background:
+      radial-gradient(
+        44rem 32rem at var(--cursor-x) var(--cursor-y),
+        rgba(10, 132, 255, 0.1) 0%,
+        rgba(123, 91, 245, 0.07) 34%,
+        transparent 68%
+      ),
+      radial-gradient(
+        34rem 26rem at calc(100% - var(--cursor-x)) calc(var(--cursor-y) + 12%),
+        rgba(233, 53, 193, 0.09) 0%,
+        transparent 62%
+      ),
+      radial-gradient(28rem 22rem at 50% 110%, rgba(255, 138, 101, 0.12) 0%, transparent 65%);
+    transition: background-position 0.5s ease-out;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  .rhythm-stack > * + * {
+    margin-top: 40px;
+  }
+}
+
+/* Honour reduced-motion: kill drift, shimmer and entrance animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

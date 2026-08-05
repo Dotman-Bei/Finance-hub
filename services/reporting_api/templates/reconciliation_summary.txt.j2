@@ -1,0 +1,73 @@
+{# Jinja2 lays out the report; ReportLab renders it (build.md Sec. 3.4.2).
+
+   A line-oriented template rather than HTML: ReportLab draws flowables, not a
+   DOM, so an HTML template would need a converter that adds a dependency and a
+   failure mode for no benefit. Each line becomes a paragraph or a table
+   directive that reports.py interprets.
+
+   Directives:
+     ##H1 / ##H2   heading
+     ##TABLE:name  emit the named table
+     ##SPACER      vertical gap
+     ##PAGEBREAK   new page
+     anything else body text
+#}
+##H1 {{ title }}
+
+Report ID    {{ report_id }}
+Generated    {{ generated_at }}
+Prepared by  {{ generated_by }}
+Period       {{ period_start or 'inception' }} to {{ period_end or 'today' }}
+
+This report is generated from the FinanceHub reconciliation database. Every
+figure is computed at generation time from the transactions, matched records
+and exception queue as they stood; no value is estimated or carried forward.
+
+##H2 Reconciliation summary
+##TABLE:kpi
+
+{% if kpi.match_rate is none -%}
+No transactions were ingested in the reporting period, so no match rate can be
+computed. This is reported as unavailable rather than as zero.
+{%- else -%}
+Of {{ '{:,}'.format(kpi.total_transactions) }} transactions in the period,
+{{ '{:.2%}'.format(kpi.match_rate) }} were reconciled automatically. The
+deterministic rule layer is applied first; only the remainder reaches the
+unsupervised matching layer, and only pairs scoring at or above the configured
+confidence threshold are posted.
+{%- endif %}
+
+##SPACER
+##H2 Match-rate analytics
+##TABLE:match_rate
+
+##SPACER
+##H2 Exception log
+{% if exceptions -%}
+{{ exceptions|length }} exception{{ 's' if exceptions|length != 1 else '' }}
+{{ 'are' if exceptions|length != 1 else 'is' }} listed below with the category
+assigned by the classifier and the resolution pathway proposed for each.
+##TABLE:exceptions
+{%- else -%}
+No exceptions were outstanding in this period.
+{%- endif %}
+
+##SPACER
+##H2 Category distribution
+##TABLE:categories
+
+##SPACER
+##H2 Validation and data quality
+##TABLE:validation
+
+{% if kpi.validation_detection_rate is not none -%}
+The ingestion pipeline quarantined
+{{ '{:.2%}'.format(kpi.validation_detection_rate) }} of records presented in the
+period. Quarantined payloads are retained in full and can be replayed once the
+upstream feed is corrected.
+{%- endif %}
+
+##SPACER
+This document was produced by FinanceHub for audit purposes. Its identifier is
+recorded in the reports table and the figures can be reproduced from the
+database as at the generation timestamp above.
