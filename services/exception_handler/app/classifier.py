@@ -142,13 +142,25 @@ class BootstrapClassifier:
                 rationale="amounts and dates agree but no reference code to match on",
             )
 
-        # 4. A single counterpart settling less than the obligation.
-        if 0 < ratio < 1.0 - AMOUNT_EQUAL_TOLERANCE:
+        # 4. The two amounts differ materially: one side is short.
+        #
+        # Tested symmetrically, because both sides of an unmatched pair land in
+        # the queue and both get classified. Viewed from the obligation the
+        # ratio is 0.64; viewed from the receipt it is 1.57. Only testing
+        # ratio < 1 classified the obligation as a PARTIAL_PAYMENT and dropped
+        # its counterpart through to the default, so the same discrepancy
+        # appeared in the queue twice under two categories with two different
+        # remediation pathways.
+        if ratio > 0 and abs(ratio - 1.0) > AMOUNT_EQUAL_TOLERANCE:
+            settled_share = min(ratio, 1.0 / ratio)
             return Classification(
                 ExceptionCategory.PARTIAL_PAYMENT.value,
-                confidence=min(0.92, 0.55 + 0.4 * ratio),
+                confidence=min(0.92, 0.55 + 0.4 * settled_share),
                 engine=self.engine,
-                rationale=f"counterpart settles {ratio:.0%} of the obligation",
+                rationale=(
+                    f"amounts differ; the smaller settles {settled_share:.0%} "
+                    f"of the larger"
+                ),
             )
 
         # 5. Nothing nominated at all. A missing reference is the most common

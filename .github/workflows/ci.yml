@@ -1,0 +1,218 @@
+# FinanceHub CI (build.md Sec. 14: "Wire these into CI").
+#
+# Each objective has a measurable release gate. They run as named steps rather
+# than one opaque `pytest`, so a failure names the objective it broke:
+#
+#   Objective 1  match precision, latency      matching_engine
+#   Objective 2  >=98% detection rate          validation_pipeline
+#   Objective 3  per-category accuracy         exception_handler
+#   Objective 3  feedback improvement          exception_handler
+#   Objective 4  RBAC, PDFs, live feed         reporting_api
+#
+# The integration job is the reason this file matters most. Those tests skip
+# themselves when no database is reachable, which is right for a developer
+# without Docker but would mean the audit trigger is never exercised anywhere.
+# CI provides Postgres, so they run on every push.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ── Offline suite: everything that needs no infrastructure ─────────────
+  tests:
+    name: Unit tests and release gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r shared/requirements.txt
+          pip install -r services/validation_pipeline/requirements.txt
+          pip install -r services/matching_engine/requirements.txt
+          pip install -r services/exception_handler/requirements.txt
+          pip install -r services/reporting_api/requirements.txt
+
+      - name: Shared models and schema drift
+        run: pytest shared/tests -v
+
+      # Named per objective so a red build points at the claim it broke.
+      - name: "GATE Objective 2 — detection rate >=98%, zero valid records lost"
+        run: pytest services/validation_pipeline/tests/test_detection_rate.py -v
+
+      - name: "GATE Objective 1 — match precision vs labelled ground truth"
+        run: pytest services/matching_engine/tests/test_precision.py -v
+
+      - name: "GATE Objective 1 — reconciliation latency and scaling"
+        run: pytest services/matching_engine/tests/test_latency.py -v
+
+      - name: "GATE Objective 3 — per-category classifier accuracy"
+        run: pytest services/exception_handler/tests/test_classifier.py -v
+
+      - name: "GATE Objective 3 — accuracy after retraining >= before"
+        run: pytest services/exception_handler/tests/test_feedback.py -v
+
+      - name: Remaining unit tests
+        run: pytest -q
+
+      - name: End-to-end flow across all four subsystems
+        run: pytest tests/test_end_to_end.py -v
+
+  # ── Integration: the parts only a real database can prove ─────────────
+  integration:
+    name: Integration (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: financehub
+          POSTGRES_USER: financehub
+          POSTGRES_PASSWORD: changeme
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U financehub -d financehub"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgresql+psycopg2://financehub:changeme@localhost:5432/financehub
+      TEST_DATABASE_URL: postgresql+psycopg2://financehub:changeme@localhost:5432/financehub
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r shared/requirements.txt
+          pip install -r services/reporting_api/requirements.txt
+          pip install -r services/exception_handler/requirements.txt
+
+      - name: Apply the schema
+        run: |
+          PGPASSWORD=changeme psql -h localhost -U financehub -d financehub -v ON_ERROR_STOP=1 -f db/schema.sql
+
+      - name: Schema is re-runnable
+        # Postgres' entrypoint and the alembic baseline both apply this file,
+        # so applying it twice must be a no-op rather than a failure.
+        run: |
+          PGPASSWORD=changeme psql -h localhost -U financehub -d financehub -v ON_ERROR_STOP=1 -f db/schema.sql
+
+      - name: Alembic reaches head
+        run: cd db && alembic upgrade head
+
+      - name: "GATE Phase 6 — audit trigger fires and the trail is complete"
+        run: pytest tests/test_integration_db.py -v -m integration
+
+      - name: Fail if the integration tests silently skipped
+        # A skip here means the database was unreachable and the audit trigger
+        # went untested — which is exactly the state this job exists to prevent.
+        run: |
+          pytest tests/test_integration_db.py -m integration -q 2>&1 | tee /tmp/out
+          if grep -qiE "skipped|no tests ran" /tmp/out; then
+            echo "::error::Integration tests skipped — Postgres was not reachable."
+            exit 1
+          fi
+
+  # ── Frontend ──────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: No mock data in runtime code
+        # The project rule: services read real data or fail visibly. Synthetic
+        # corpora belong to tests only (build.md Sec. 14).
+        run: |
+          if grep -rniE "demoData|startDemoStream|placeholderPdf|synthetic corpus" src/; then
+            echo "::error::Mock data found in frontend runtime code."
+            exit 1
+          fi
+          echo "No mock data in src/."
+
+  # ── Images build ──────────────────────────────────────────────────────
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - validation_pipeline
+          - matching_engine
+          - exception_handler
+          - reporting_api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          # Repo root, not the service directory: every service imports
+          # `shared.*`, which sits outside its own folder.
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Compose config is valid
+        run: docker compose --env-file .env.example config >/dev/null

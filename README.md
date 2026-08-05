@@ -21,7 +21,7 @@ build.md §14 calls for.
 | **4** | Reporting API (Subsystem 4 backend) | ✅ **done** — RBAC, ReportLab PDFs, live WS relay |
 | **4** | Dashboard (Subsystem 4 UI) | ✅ **done** — mock layer removed, reads the live gateway |
 | **5** | Feedback loop + retraining | ✅ **done** — gate: 0.84 → 1.00 over rolling rounds |
-| 6 | Hardening | ⬜ not started |
+| **6** | Hardening | ✅ **done** — audit gate, e2e, load test, CI |
 
 ---
 
@@ -118,6 +118,9 @@ was wrong, not what was right.
 | 1 | p95 latency + no superlinear scaling | `matching_engine/tests/test_latency.py` | ✅ 583ms / 600 txns |
 | 3 | Per-category precision/recall, held-out | `exception_handler/tests/test_classifier.py` | ✅ forest 1.00, rules 0.89 |
 | 3 | Accuracy after retraining ≥ before | `exception_handler/tests/test_feedback.py` | ✅ monotonic, 0.84 → 1.00 |
+| — | Audit trail complete (trigger fires) | `tests/test_integration_db.py` | ⚙️ CI only — needs PostgreSQL |
+| — | End-to-end across four subsystems | `tests/test_end_to_end.py` | ✅ |
+| 1 | Load at month-end volume | `matching_engine/tests/test_latency.py` | ✅ 6000 txns, 0.74ms/txn |
 
 Gate numbers are measured on synthetic corpora (build.md §14 sanctions these
 for tests). They bound what the code can do on data shaped like the
@@ -125,6 +128,25 @@ assumptions; they are not production estimates. The classifier gate is
 deliberately measured on a corpus that is **50% ambiguous cases** — on cleanly
 separable data both engines score 1.00, which measures the corpus rather than
 the classifier.
+
+`tests/test_integration_db.py` skips itself when no database is reachable, so a
+developer without Docker still gets a green local run. CI provides PostgreSQL
+and **fails the build if those tests skip** — otherwise the audit trigger, on
+which §3.3.2's tamper-evidence entirely rests, would go untested everywhere.
+
+---
+
+## Running the gates
+
+```bash
+pytest                                    # everything (integration auto-skips)
+pytest -m integration                     # needs `docker compose up -d postgres`
+pytest services/matching_engine/tests/test_latency.py -v    # load + scaling
+```
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs each gate as a named
+step, so a red build names the objective it broke rather than reporting one
+opaque failure.
 
 Run `pytest` to see the measured margins printed, not just pass/fail — including
 the threshold sweep that evidences Sec. 9's false-positive claim.

@@ -58,6 +58,7 @@ from shared.events import publisher
 from shared.models.enums import ExceptionCategory, ExceptionState
 from shared.models.orm import ExceptionQueue, Report, Transaction
 
+from .audit import actor_activity, integrity_report, query_trail
 from .auth import (
     REQUIRE_AUTH,
     Permission,
@@ -505,6 +506,51 @@ async def download_report(
 async def exceptions_socket(websocket: WebSocket) -> None:
     """Sec. 12's live feed. Relays only; it originates nothing."""
     await serve(websocket, state["manager"], state["relay"])
+
+
+# ── Audit trail (§3.3.2) ─────────────────────────────────────────────────
+# Gated on VIEW_AUDIT_TRAIL, which only Auditors and Administrators hold — a
+# Finance Manager can change records but not review the log of changes.
+
+
+@app.get("/audit")
+async def audit_trail(
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    actor: str | None = Query(default=None),
+    action: str | None = Query(default=None),
+    since: dt.datetime | None = Query(default=None),
+    limit: int = Query(default=200, gt=0, le=1000),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(requires(Permission.VIEW_AUDIT_TRAIL)),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Read the append-only change log. There is no write counterpart."""
+    return await run_in_threadpool(
+        query_trail, session, entity_type, entity_id, actor, action, since, limit, offset
+    )
+
+
+@app.get("/audit/integrity")
+async def audit_integrity(
+    principal: Principal = Depends(requires(Permission.VIEW_AUDIT_TRAIL)),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Check every settled exception left an audit row (§16's audit gate).
+
+    `complete: false` means the trigger is absent from this database or a write
+    bypassed it. Either invalidates the tamper-evidence claim, and neither
+    surfaces anywhere else.
+    """
+    return await run_in_threadpool(integrity_report, session)
+
+
+@app.get("/audit/actors")
+async def audit_actors(
+    principal: Principal = Depends(requires(Permission.VIEW_AUDIT_TRAIL)),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    return await run_in_threadpool(actor_activity, session)
 
 
 @app.get("/stats")

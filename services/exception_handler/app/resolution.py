@@ -65,21 +65,31 @@ def _money(value: float, currency: str = "USD") -> str:
 def _partial_payment(features: ExceptionFeatures) -> dict[str, Any]:
     context = features.context
     currency = context.get("currency", "USD")
-    obligation = float(context.get("amount") or 0.0)
-    settled = float(context.get("nearest_amount") or 0.0)
+    this_amount = float(context.get("amount") or 0.0)
+    counterpart_amount = float(context.get("nearest_amount") or 0.0)
+
+    # Both sides of an unmatched pair are queued and classified, so this row
+    # may be either the obligation or the receipt. The obligation is always the
+    # larger of the two; assuming it was this row produced a negative residual
+    # balance whenever the receipt side was the one being described.
+    obligation = max(this_amount, counterpart_amount)
+    settled = min(this_amount, counterpart_amount)
     balance = round(obligation - settled, 2)
+    viewed_from = "obligation" if this_amount >= counterpart_amount else "receipt"
 
     return {
         "detail": (
-            f"Counterpart settles {_money(settled, currency)} of a "
+            f"{_money(settled, currency)} settled against a "
             f"{_money(obligation, currency)} obligation. Post the partial match "
             f"and carry {_money(balance, currency)} forward for follow-up."
         ),
         "fields": {
             "settled_amount": round(settled, 2),
             "obligation_amount": round(obligation, 2),
+            # Always the amount still outstanding, never negative.
             "residual_balance": balance,
-            "settled_share": round(features.amount_ratio, 4),
+            "settled_share": round(settled / obligation, 4) if obligation else 0.0,
+            "viewed_from": viewed_from,
             "follow_up": "BALANCE_WATCHLIST",
             "counterpart_id": str(context["nearest_id"])
             if context.get("nearest_id")

@@ -133,6 +133,46 @@ def test_scaling_is_not_quadratic(matcher, capsys):
     )
 
 
+def test_sustains_a_month_end_volume(matcher, capsys):
+    """Load test (build.md Sec. 7, "Load/latency tests").
+
+    The budgeted test above runs 600 transactions, which a laptop clears
+    comfortably. Reconciliation engines fail at the volume they actually meet -
+    a month-end close, where a quarter's unmatched backlog arrives at once - so
+    this runs an order of magnitude larger and checks the per-transaction cost
+    established at small scale still holds.
+
+    Asserting on per-transaction cost rather than wall-clock keeps the test
+    meaningful on CI hardware slower than a developer machine.
+    """
+    truth = build_ground_truth(pair_count=2500, decoy_count=1000, seed=808)
+    pipeline = MatchingPipeline(matcher=matcher)
+    size = len(truth.transactions)
+
+    started = time.perf_counter()
+    result = pipeline.reconcile(truth.transactions)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    per_transaction = elapsed_ms / size
+
+    with capsys.disabled():
+        print(
+            f"\n  load: {size} transactions in {elapsed_ms / 1000:.1f}s "
+            f"({per_transaction:.2f}ms/txn) -> {len(result.matched)} matched, "
+            f"{len(result.unmatched)} queued"
+        )
+
+    assert per_transaction <= PER_TRANSACTION_BUDGET_MS, (
+        f"{per_transaction:.2f}ms per transaction at {size} rows exceeds the "
+        f"{PER_TRANSACTION_BUDGET_MS}ms budget measured at small scale"
+    )
+
+    # Correctness must survive the volume, not just speed. Nothing may be lost.
+    accounted = {p.internal_id for p in result.matched} | {
+        p.external_id for p in result.matched
+    } | {u.transaction_id for u in result.unmatched}
+    assert len(accounted) == size
+
+
 def test_empty_batch_returns_immediately(matcher):
     import pandas as pd
 
