@@ -291,3 +291,114 @@ def test_summary_has_the_shape_section_9_specifies(pipeline):
     summary = pipeline.reconcile(frame).summary()
     for key in ("matched", "unmatched", "match_rate"):
         assert key in summary
+
+
+# ── Co-settling nomination (what makes SPLIT_SETTLEMENT reachable) ───────
+#
+# These guard a seam, not a component. The engine recorded one best
+# counterpart per unmatched row, so `counterpart_count` never exceeded 1 and
+# Sec. 10's SPLIT_SETTLEMENT - which is defined by multiplicity - could not
+# occur in the assembled system. Every isolated test still passed, because the
+# classifier corpus builds features from a hand-made counterpart list and
+# never runs the matcher. Only a test spanning both sides catches it.
+
+
+#: Filler counterparties. The ML layer reaches split legs through the
+#: description-cluster channel, not amount/date blocking - a leg worth a third
+#: of the obligation is far outside the 20% blocking tolerance. Clustering
+#: needs a batch with structure in it, so these pad the frame; a four-row
+#: frame produces no clusters and every row reports "no candidate counterpart".
+_FILLER = [
+    "Arcadia Payments BV", "Solstice Retail Group", "Harborline Freight",
+    "Lumen Energy Partners", "Orion Manufacturing", "Bluepeak Insurance",
+    "Fairmount Trading Co", "Ridgeway Chemicals",
+]
+
+
+def _obligation_and_legs(total: float, shares: list[float]) -> pd.DataFrame:
+    """One internal obligation discharged by several external receipts."""
+    rows = [
+        txn(
+            external_id="ERP-SPLIT",
+            amount=total,
+            reference_code="REF-SPLIT",
+            description="Northwind Logistics - invoice remittance",
+        )
+    ]
+    rows.extend(
+        txn(
+            id=uuid.uuid4(),
+            external_id=f"BNK-LEG-{n}",
+            source_type="bank_api",
+            amount=round(total * share, 2),
+            reference_code=None,
+            description=f"Northwind Logistics - invoice remittance part {n}",
+            txn_date=TODAY - dt.timedelta(days=4),
+        )
+        for n, share in enumerate(shares)
+    )
+
+    # Unrelated but well-formed traffic, so the batch clusters like a real one.
+    for n, counterparty in enumerate(_FILLER):
+        amount = 500.00 + n * 250
+        for side in ("erp", "bank_api"):
+            rows.append(
+                txn(
+                    id=uuid.uuid4(),
+                    external_id=f"{side.upper()}-FILL-{n}",
+                    source_type=side,
+                    amount=amount,
+                    reference_code=f"REF-FILL-{n}",
+                    description=f"{counterparty} - settlement",
+                    txn_date=TODAY - dt.timedelta(days=7),
+                )
+            )
+
+    return pd.DataFrame(rows)
+
+
+def _item_for(result, frame, external_id):
+    wanted = frame.loc[frame["external_id"] == external_id, "id"].iloc[0]
+    return next(i for i in result.unmatched if i.transaction_id == wanted)
+
+
+def test_split_settlement_nominates_every_leg(pipeline):
+    frame = _obligation_and_legs(9000.00, [0.34, 0.33, 0.31])
+    item = _item_for(pipeline.reconcile(frame), frame, "ERP-SPLIT")
+
+    # Multiplicity is what Sec. 10 keys on; one candidate makes the category
+    # unreachable no matter how well the classifier performs.
+    assert len(item.candidate_ids) >= 2
+
+
+def test_a_single_partial_payment_nominates_only_one(pipeline):
+    """The inverse guard: over-nominating relabels partials as splits."""
+    frame = _obligation_and_legs(9000.00, [0.70])
+    item = _item_for(pipeline.reconcile(frame), frame, "ERP-SPLIT")
+    assert len(item.candidate_ids) <= 1
+
+
+def test_equal_value_lookalikes_are_not_co_settling(pipeline):
+    """Similar counterparties settling similar amounts are competing matches.
+
+    Each candidate here is worth nearly the whole obligation, so they cannot
+    be legs of it. Nominating them would turn every crowded cluster into a
+    split settlement.
+    """
+    frame = _obligation_and_legs(9000.00, [0.99, 0.98, 0.97])
+    item = _item_for(pipeline.reconcile(frame), frame, "ERP-SPLIT")
+    assert len(item.candidate_ids) <= 1
+
+
+def test_candidate_ids_survive_into_the_queue_payload():
+    """persistence.py must write the key feedback.py reads, or the fix is inert."""
+    from services.matching_engine.app.pipeline import UnmatchedItem
+
+    item = UnmatchedItem(
+        transaction_id=uuid.uuid4(),
+        reason="below confidence threshold",
+        best_confidence=0.6,
+        best_counterpart_id=uuid.uuid4(),
+        candidate_ids=[uuid.uuid4(), uuid.uuid4()],
+    )
+    assert len(item.candidate_ids) == 2

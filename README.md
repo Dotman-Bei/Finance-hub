@@ -151,26 +151,42 @@ developer without Docker still gets a green local run. CI provides PostgreSQL
 and **fails the build if those tests skip** — otherwise the audit trigger, on
 which §3.3.2's tamper-evidence entirely rests, would go untested everywhere.
 
-### Known gap: `SPLIT_SETTLEMENT` is unreachable end to end
+### Co-settling nomination: how `SPLIT_SETTLEMENT` became reachable
 
 The classifier reaches `SPLIT_SETTLEMENT` only when `counterpart_count >= 2`
-([classifier.py:106](services/exception_handler/app/classifier.py#L106)).
-Counterparts come from `_nominated_ids`, which reads `best_counterpart_id`
-plus a `candidate_ids` list — and **nothing writes `candidate_ids`**. The
-matching engine records one best counterpart per unmatched row
-([persistence.py:110](services/matching_engine/app/persistence.py#L110)), so
-in the running system the count never exceeds 1 and one of Objective 3's four
-categories cannot occur.
+([classifier.py:106](services/exception_handler/app/classifier.py#L106)), and
+the engine used to record one best counterpart per unmatched row — so the
+count never exceeded 1 and one of Objective 3's four categories could not
+occur in the assembled system. Every isolated test passed anyway, because
+`exception_corpus.py` builds features from a hand-made counterpart list and
+never runs the matcher. Seeded data through the real path exposed it: three
+categories appeared and this one never did.
 
-The classifier gate does not catch this because `exception_corpus.py` calls
-`extract()` with a hand-built list of several counterparts, bypassing the
-matching engine. Surfaced by running `tools/seed.py` data through the real
-path, where three of four categories appear and this one never does.
+The engine now records every co-settling candidate under
+`suggested_resolution.matching_engine.candidate_ids` — the key `_nominated_ids`
+already read. Two details make it correct rather than merely non-empty:
 
-**Fix:** have the ML layer record every candidate it nominated for a
-transaction, not just the highest-scoring one, under
-`suggested_resolution.matching_engine.candidate_ids` — the key the reader
-already expects.
+- **Candidates come from the pre-resolution scored set.** `resolve_one_to_one`
+  keeps a single pair per transaction, which is right for deciding matches and
+  destroys exactly what is needed here — a split settlement is the case where
+  the pairs it discards are the other legs of the same obligation.
+- **Nomination is filtered by arithmetic, not similarity.** Multiplicity *is*
+  the definition of a split, so a loose filter relabels ordinary partial
+  payments as splits — worse than nominating nothing. Confidence cannot carry
+  that weight: the legs of a split and an unrelated invoice from the same
+  counterparty are similar in the same way. Legs must each be a fraction of
+  the obligation (`LEG_MAX_SHARE`) and together roughly discharge it
+  (`SPLIT_COVERAGE_CAP`); anything else falls back to the single best
+  candidate.
+
+Measured on the 965-record seed corpus: all four categories present, 12 rows
+receive multiple nominations, and no other archetype leaks into
+`SPLIT_SETTLEMENT`. An earlier confidence-only filter produced 82 predictions
+at roughly 15% precision, which is what motivated the arithmetic one.
+
+Guarded by four tests in `matching_engine/tests/test_layers.py` that span the
+matcher-to-classifier seam, including the inverse cases — a lone partial
+payment and equal-value lookalikes must **not** nominate multiple candidates.
 
 ---
 

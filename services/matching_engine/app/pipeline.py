@@ -33,6 +33,83 @@ from .scoring import ScoredPair, partition_by_threshold, resolve_one_to_one, sco
 
 logger = logging.getLogger(__name__)
 
+#: A co-settling candidate must score at least this fraction of the best
+#: candidate's confidence. The legs of a genuine split settle the same
+#: obligation and therefore score alike; an unrelated lookalike from the same
+#: counterparty scores visibly worse. Without a floor, every long tail of weak
+#: candidates would read as multiplicity, and Sec. 10 treats multiplicity as
+#: the *definition* of a split - so a loose filter here would relabel ordinary
+#: partial payments as split settlements, which is worse than nominating none.
+CANDIDATE_RELATIVE_FLOOR = 0.80
+
+#: Beyond a handful, extra legs neither change the classification nor the
+#: suggested allocation, and they bloat a JSONB column read on every dashboard
+#: poll.
+MAX_CANDIDATES = 6
+
+#: A co-settling leg is a *fraction* of the obligation. Similarity alone is not
+#: enough to nominate several: transactions from the same counterparty score
+#: alike whether or not they settle the same invoice, and a lookalike of
+#: roughly equal value is a competing match, not a leg.
+LEG_MAX_SHARE = 0.95
+
+#: Legs may over-settle slightly (rounding, fees) but not unboundedly. Past
+#: this, the set is not discharging one obligation.
+SPLIT_COVERAGE_CAP = 1.10
+
+
+def _co_settling_candidates(
+    transaction_id: Any,
+    ranked: list[ScoredPair],
+    amount_by_id: dict[Any, float],
+) -> list[Any]:
+    """Counterpart ids plausibly settling the same obligation, best first.
+
+    `ranked` is every pair touching this transaction, sorted by confidence.
+
+    Reporting more than one counterpart is a strong claim: Sec. 10 treats
+    multiplicity as the *definition* of a split settlement, so a loose filter
+    here relabels ordinary partial payments as splits - worse than nominating
+    nothing. Confidence alone does not carry that weight, because the legs of
+    a split and an unrelated invoice from the same counterparty are similar in
+    exactly the same way. Arithmetic does: legs are each a fraction of the
+    obligation and together roughly discharge it. Anything failing that falls
+    back to the single best candidate, which is the pre-existing behaviour.
+    """
+    if not ranked:
+        return []
+
+    floor = ranked[0].confidence * CANDIDATE_RELATIVE_FLOOR
+
+    ordered: list[Any] = []
+    for pair in ranked:
+        if pair.confidence < floor:
+            break
+        other = (
+            pair.external_id if pair.internal_id == transaction_id else pair.internal_id
+        )
+        if other is not None and other not in ordered:
+            ordered.append(other)
+        if len(ordered) >= MAX_CANDIDATES:
+            break
+
+    obligation = amount_by_id.get(transaction_id)
+    if len(ordered) < 2 or not obligation or obligation <= 0:
+        return ordered[:1]
+
+    kept: list[Any] = []
+    running = 0.0
+    for candidate_id in ordered:
+        amount = amount_by_id.get(candidate_id)
+        if not amount or amount <= 0 or amount >= obligation * LEG_MAX_SHARE:
+            continue
+        if running + amount > obligation * SPLIT_COVERAGE_CAP:
+            break
+        kept.append(candidate_id)
+        running += amount
+
+    return kept if len(kept) >= 2 else ordered[:1]
+
 
 @dataclass
 class UnmatchedItem:
@@ -42,6 +119,12 @@ class UnmatchedItem:
     reason: str
     best_confidence: float = 0.0
     best_counterpart_id: Any = None
+    #: Every counterpart nominated for this transaction, best first (the best
+    #: one included). A split settlement is several receipts against one
+    #: obligation, and Sec. 10 separates it from a partial payment by
+    #: multiplicity alone - so recording only the single best candidate left
+    #: SPLIT_SETTLEMENT unreachable in the assembled system.
+    candidate_ids: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -160,7 +243,7 @@ class MatchingPipeline:
         matched.extend(above)
 
         unmatched = self._collect_unmatched(
-            internal_left, external_left, above, below, isolated_ids
+            internal_left, external_left, above, below, isolated_ids, scored
         )
 
         result = ReconcileResult(
@@ -208,6 +291,7 @@ class MatchingPipeline:
         above: list[ScoredPair],
         below: list[ScoredPair],
         isolated_ids: set[Any],
+        scored: list[ScoredPair],
     ) -> list[UnmatchedItem]:
         """Everything the ML layer could not confirm, with why.
 
@@ -223,6 +307,29 @@ class MatchingPipeline:
                 current = best.get(side_id)
                 if current is None or pair.confidence > current.confidence:
                     best[side_id] = pair
+
+        # Candidates are drawn from the *pre-resolution* set, not from `below`.
+        # `resolve_one_to_one` keeps a single pair per transaction, which is
+        # correct for deciding matches and destroys exactly what Sec. 10 needs
+        # here: a split settlement is the case where the pairs it discards are
+        # the remaining legs of the same obligation. Pairs touching an
+        # already-matched transaction are skipped - nominating a counterpart
+        # that reconciled elsewhere would be misleading.
+        nominations: dict[Any, list[ScoredPair]] = {}
+        for pair in scored:
+            if pair.internal_id in claimed or pair.external_id in claimed:
+                continue
+            for side_id in (pair.internal_id, pair.external_id):
+                nominations.setdefault(side_id, []).append(pair)
+        for pairs in nominations.values():
+            pairs.sort(key=lambda p: p.confidence, reverse=True)
+
+        amount_by_id: dict[Any, float] = {}
+        for frame in (internal, external):
+            if "amount" in frame.columns:
+                amount_by_id.update(
+                    zip(frame["id"], pd.to_numeric(frame["amount"], errors="coerce"))
+                )
 
         unmatched: list[UnmatchedItem] = []
         for frame in (internal, external):
@@ -244,6 +351,11 @@ class MatchingPipeline:
                             reason="below confidence threshold",
                             best_confidence=near.confidence,
                             best_counterpart_id=counterpart,
+                            candidate_ids=_co_settling_candidates(
+                                transaction_id,
+                                nominations.get(transaction_id, []),
+                                amount_by_id,
+                            ),
                         )
                     )
                 elif transaction_id in isolated_ids:

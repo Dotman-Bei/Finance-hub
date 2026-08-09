@@ -115,6 +115,12 @@ def persist_result(
                         "best_counterpart_id": str(item.best_counterpart_id)
                         if item.best_counterpart_id
                         else None,
+                        # Sec. 10 reads this to count counterparts, which is
+                        # how it tells a split settlement from a partial
+                        # payment. Stringified like the id above: JSONB has no
+                        # UUID type, and the reader compares against ids it
+                        # loaded the same way.
+                        "candidate_ids": [str(c) for c in item.candidate_ids],
                         "threshold": result.threshold,
                     }
                 }
