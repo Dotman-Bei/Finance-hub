@@ -7,6 +7,7 @@ import Hero from './components/Hero'
 import KpiSummaryCards from './components/KpiSummaryCards'
 import MatchRateChart from './components/MatchRateChart'
 import ReportsPanel from './components/ReportsPanel'
+import SignIn from './components/SignIn'
 import ToastStack from './components/ToastStack'
 import Icon from './components/ui/Icon'
 import Section from './components/ui/Section'
@@ -22,7 +23,9 @@ import {
   getMatchRate,
   getReports,
   normalizeException,
+  probePrincipal,
   resolveException,
+  signIn,
 } from './api/reportingApi'
 import { ROLES } from './lib/constants'
 import { currency, relativeTime } from './lib/format'
@@ -77,8 +80,28 @@ function ErrorBanner({ error, onRefresh, refreshing }) {
   )
 }
 
+/**
+ * Authentication state.
+ *
+ * `checking` is a real state, not a loading flicker: until the gateway has been
+ * asked whether it enforces auth at all, showing either the dashboard or the
+ * sign-in card would be a guess. `REQUIRE_AUTH=false` deployments answer
+ * /auth/me without credentials and skip the card entirely.
+ */
+const AUTH_CHECKING = 'checking'
+const AUTH_REQUIRED = 'required'
+const AUTH_READY = 'ready'
+
 export default function App() {
   const [role, setRole] = useState(() => auth.getRole())
+  const [authState, setAuthState] = useState(
+    // A stored token is assumed good until a 401 says otherwise. Re-probing on
+    // every mount would cost a round trip to learn what the next request
+    // reveals anyway.
+    () => (auth.getToken() ? AUTH_READY : AUTH_CHECKING)
+  )
+  const [authError, setAuthError] = useState(null)
+  const [authPending, setAuthPending] = useState(false)
   const [connection, setConnection] = useState(connectionStatus.get())
 
   const [kpi, setKpi] = useState(null)
@@ -106,6 +129,62 @@ export default function App() {
   useEffect(() => {
     auth.setRole(role)
   }, [role])
+
+  /* ── Authentication ─────────────────────────────────────────────────── */
+
+  useEffect(() => {
+    if (authState !== AUTH_CHECKING) return
+
+    let cancelled = false
+    probePrincipal()
+      .then((principal) => {
+        if (cancelled) return
+        if (principal) {
+          // The gateway answered without a token, so auth is disabled here.
+          if (principal.role) setRole(principal.role)
+          setAuthState(AUTH_READY)
+        } else {
+          setAuthState(AUTH_REQUIRED)
+        }
+      })
+      .catch(() => {
+        // The gateway is unreachable rather than refusing us. Show the card:
+        // it carries the "start the gateway" message and a way to retry.
+        if (!cancelled) setAuthState(AUTH_REQUIRED)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [authState])
+
+  const handleSignIn = useCallback(async ({ role: nextRole, apiKey }) => {
+    setAuthPending(true)
+    setAuthError(null)
+    try {
+      const data = await signIn({ role: nextRole, apiKey })
+      auth.setToken(data.access_token)
+      // Remember the key so a role switch can mint a new token without asking
+      // for it again. sessionStorage, not localStorage: it should not outlive
+      // the tab the way the token deliberately does.
+      sessionStorage.setItem('financehub.key', apiKey)
+      setRole(nextRole)
+      setAuthState(AUTH_READY)
+    } catch (error) {
+      setAuthError(error)
+    } finally {
+      setAuthPending(false)
+    }
+  }, [])
+
+  const handleSignOut = useCallback(() => {
+    auth.setToken('')
+    sessionStorage.removeItem('financehub.key')
+    setAuthError(null)
+    setAuthState(AUTH_REQUIRED)
+  }, [])
+
+  // `handleRoleChange` needs `load`, so it lives with the other actions below.
 
   /* ── Data loading ───────────────────────────────────────────────────── */
 
@@ -150,8 +229,15 @@ export default function App() {
   )
 
   useEffect(() => {
-    load()
-  }, [load])
+    if (authState === AUTH_READY) load()
+  }, [load, authState])
+
+  // A token that expires mid-session, or one minted before the gateway's secret
+  // changed, surfaces as 401 on every panel. Returning to the card is the only
+  // action that can fix it; leaving four error cards up is not.
+  useEffect(() => {
+    if (loadError?.status === 401) handleSignOut()
+  }, [loadError, handleSignOut])
 
   /* ── Live exception feed ────────────────────────────────────────────── */
 
@@ -188,6 +274,43 @@ export default function App() {
     setRunning(false)
     push({ tone: 'success', title: 'Dashboard up to date', body: 'Metrics re-read from the gateway.' })
   }, [load, push])
+
+  /**
+   * Switching role re-issues the token.
+   *
+   * The role claim lives inside the signature; the `X-FinanceHub-Role` header
+   * is explicitly untrusted by the gateway. Without re-issuing, changing role
+   * would only change which buttons the UI draws while the server went on
+   * applying the old permissions — the appearance of RBAC rather than RBAC.
+   */
+  const handleRoleChange = useCallback(
+    async (nextRole) => {
+      const apiKey = sessionStorage.getItem('financehub.key')
+      if (!auth.getToken() || !apiKey) {
+        // Nothing to re-sign with: auth is disabled, or the key was never
+        // captured. UI-level scoping still applies.
+        setRole(nextRole)
+        return
+      }
+
+      const previous = role
+      setRole(nextRole)
+      try {
+        const data = await signIn({ role: nextRole, apiKey })
+        auth.setToken(data.access_token)
+        await load({ silent: true })
+        push({
+          tone: 'info',
+          title: `Viewing as ${ROLES[nextRole].label}`,
+          body: 'A new token was issued; the gateway now enforces this role.',
+        })
+      } catch (error) {
+        setRole(previous)
+        push({ tone: 'error', title: 'Could not switch role', body: error.message })
+      }
+    },
+    [role, load, push]
+  )
 
   const handleResolve = useCallback(
     async (item, decision) => {
@@ -267,14 +390,28 @@ export default function App() {
 
   /* ── Render ─────────────────────────────────────────────────────────── */
 
+  if (authState === AUTH_CHECKING) {
+    // Blank rather than a spinner: this resolves in one round trip, and a
+    // flashed loader is more distracting than a beat of nothing.
+    return <div className="min-h-screen bg-surface" />
+  }
+
+  if (authState === AUTH_REQUIRED) {
+    return <SignIn onSignIn={handleSignIn} pending={authPending} error={authError} />
+  }
+
   return (
     <div ref={rootRef} className="relative min-h-screen bg-surface">
       <FloatingNav
         role={role}
-        onRoleChange={setRole}
+        onRoleChange={handleRoleChange}
         onRun={handleRun}
         running={running}
         canRun={permissions.runReconciliation}
+        // Omitted when no token is in play: a REQUIRE_AUTH=false stack has
+        // nothing to sign out of, and offering it would strand the user at a
+        // card they cannot get past.
+        onSignOut={auth.getToken() ? handleSignOut : undefined}
       />
 
       <main>

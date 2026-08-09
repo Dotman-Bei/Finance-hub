@@ -103,6 +103,47 @@ export function normalizeException(raw) {
   }
 }
 
+/* ── Auth ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Whether the gateway enforces auth at all, and who we currently are.
+ *
+ * `REQUIRE_AUTH=false` makes every caller a SYSTEM_ADMINISTRATOR, and in that
+ * configuration a sign-in wall would be a dead end rather than a gate — worse
+ * still when SERVICE_API_KEY is also unset, because then token issue returns
+ * 503 and nothing can get past it. Probing first is what lets the app show the
+ * card only when a token is actually needed.
+ *
+ * Returns the principal when the gateway answers without credentials, or null
+ * when it demands them.
+ */
+export async function probePrincipal() {
+  try {
+    const { data } = await axiosClient.get('/auth/me')
+    return data
+  } catch (error) {
+    if (error.status === 401 || error.status === 403) return null
+    throw error
+  }
+}
+
+/**
+ * Exchange the shared service key for a JWT carrying a role claim.
+ *
+ * The role lives *inside* the signed token: the `X-FinanceHub-Role` header the
+ * client also sends is explicitly not trusted by the gateway, so changing role
+ * means minting a new token rather than relabelling the request.
+ */
+export const signIn = ({ role, apiKey, subject = 'dashboard' }) =>
+  call(async () => {
+    const { data } = await axiosClient.post('/auth/token', {
+      role,
+      api_key: apiKey,
+      subject,
+    })
+    return data
+  })
+
 /* ── Metrics ───────────────────────────────────────────────────────────── */
 
 export const getKpi = (windowDays = 30) =>

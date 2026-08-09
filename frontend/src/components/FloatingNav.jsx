@@ -15,7 +15,7 @@ const LINKS = [
  * scrolls beneath it. Both gutters are 8px with an inset element at each end,
  * so the left (logo) and right (CTA) paddings mirror one another exactly.
  */
-export default function FloatingNav({ role, onRoleChange, onRun, running, canRun }) {
+export default function FloatingNav({ role, onRoleChange, onRun, running, canRun, onSignOut }) {
   const active = useScrollSpy(LINKS.map((l) => l.id))
 
   const scrollTo = (id) => (event) => {
@@ -83,6 +83,19 @@ export default function FloatingNav({ role, onRoleChange, onRun, running, canRun
             />
             <span className="hidden sm:inline">{running ? 'Reconciling…' : 'Reconcile'}</span>
           </button>
+          {/* Only rendered when a token is in play; a REQUIRE_AUTH=false stack
+              has nothing to sign out of. */}
+          {onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              title="Sign out and discard the token"
+              aria-label="Sign out"
+              className="btn-ghost px-2.5 py-2"
+            >
+              <Icon name="close" size={13} />
+            </button>
+          )}
         </div>
       </nav>
     </header>

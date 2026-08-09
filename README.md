@@ -276,3 +276,30 @@ docs at [localhost:8000/docs](http://localhost:8000/docs).
 `REQUIRE_AUTH=true` is the compose default. Set it to `false` for local
 development only — it makes every caller a `SYSTEM_ADMINISTRATOR` and logs a
 warning at startup.
+
+### Signing in
+
+Every data endpoint is permission-guarded, so the dashboard needs a token
+before it can render anything. It opens on a sign-in card: pick a role, and the
+key prefills from `VITE_SERVICE_API_KEY` when set (see
+[frontend/.env.example](frontend/.env.example)). That value must match
+`SERVICE_API_KEY` on the gateway.
+
+`POST /auth/token` is **not an identity provider** — it verifies one shared
+secret and mints a token for whichever role is requested. There is no user
+store in this system. A real deployment puts an IdP in front of the gateway and
+drops the endpoint.
+
+Switching role **re-issues the token**, because the gateway enforces the role
+claim inside the signature and explicitly does not trust the `X-FinanceHub-Role`
+header a client sends. Without re-issuing, changing role would restyle the UI
+while the server kept applying the old permissions. This is what makes RBAC
+demonstrable rather than decorative: sign in as Auditor and the resolve action
+is refused by the API, not merely hidden.
+
+On a stack with `REQUIRE_AUTH=false` the card is skipped — the app probes
+`/auth/me` first, so it does not put a login wall in front of a gateway that
+has no lock.
+
+A demo therefore runs: `docker compose up -d --build` → `make seed-kafka
+n=2000` → open [localhost:3000](http://localhost:3000) → sign in.
