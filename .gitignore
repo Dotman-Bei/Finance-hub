@@ -10,6 +10,10 @@ venv/
 # Trained artefacts are rebuilt by their phase, never committed
 services/*/models/*.pkl
 
+# Generated corpora. `python tools/seed.py --seed N` reproduces any of these
+# exactly, so committing them would version a build output.
+data/
+
 node_modules/
 dist/
 .DS_Store

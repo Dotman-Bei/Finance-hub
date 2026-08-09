@@ -151,6 +151,27 @@ developer without Docker still gets a green local run. CI provides PostgreSQL
 and **fails the build if those tests skip** — otherwise the audit trigger, on
 which §3.3.2's tamper-evidence entirely rests, would go untested everywhere.
 
+### Known gap: `SPLIT_SETTLEMENT` is unreachable end to end
+
+The classifier reaches `SPLIT_SETTLEMENT` only when `counterpart_count >= 2`
+([classifier.py:106](services/exception_handler/app/classifier.py#L106)).
+Counterparts come from `_nominated_ids`, which reads `best_counterpart_id`
+plus a `candidate_ids` list — and **nothing writes `candidate_ids`**. The
+matching engine records one best counterpart per unmatched row
+([persistence.py:110](services/matching_engine/app/persistence.py#L110)), so
+in the running system the count never exceeds 1 and one of Objective 3's four
+categories cannot occur.
+
+The classifier gate does not catch this because `exception_corpus.py` calls
+`extract()` with a hand-built list of several counterparts, bypassing the
+matching engine. Surfaced by running `tools/seed.py` data through the real
+path, where three of four categories appear and this one never does.
+
+**Fix:** have the ML layer record every candidate it nominated for a
+transaction, not just the highest-scoring one, under
+`suggested_resolution.matching_engine.candidate_ids` — the key the reader
+already expects.
+
 ---
 
 ## Running the gates
@@ -194,6 +215,35 @@ instead of surfacing at runtime.
 those paths may apply it to the same database.
 
 ---
+
+## Seeding data
+
+A freshly started stack is empty — every corpus in the repo belongs to a gate
+and lives under a `tests/` directory. [tools/seed.py](tools/seed.py) generates
+a two-sided corpus and keeps the answer key:
+
+```bash
+make seed n=2000                 # -> data/seed/{erp_ledger.csv,bank_feed.json,answer_key.json}
+make seed-kafka n=2000           # publish to KAFKA_TOPIC_RAW (needs `make infra`)
+```
+
+It emits **raw vendor-shaped** payloads — ERP as CSV, the bank side as JSON
+with different column names — so seeded data enters through the real front
+door and exercises Pandas normalisation, Pydantic, the GE suite and checksum
+verification on the way in. Roughly 6% of records are deliberately malformed,
+so Subsystem 2 visibly quarantines something instead of reading zero.
+
+Archetypes are mixed to production proportions (62% clean matches, the rest a
+tail of exceptions) rather than spread evenly. A flat spread pushes two thirds
+of the corpus into the queue and shows a ~25% match rate, which measures the
+corpus rather than the engine.
+
+The tool writes to files or Kafka, **never to Postgres** — nothing may reach
+the database without passing validation first, and a seeder that INSERTed
+directly would fabricate the guarantee the system exists to provide.
+
+Measured on 965 records through the real pipelines: 60/60 malformed
+quarantined, 0 valid records lost, 62% match rate.
 
 ## Running the whole system
 
