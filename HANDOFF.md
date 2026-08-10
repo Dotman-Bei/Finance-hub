@@ -101,6 +101,12 @@ substantially on 2026-08-10: the system has now been run for real.**
   exception queue, a live `exception.created` burst arriving over the
   WebSocket during a reconcile, and the Auditor role being offered no Resolve
   control. This found three real bugs on first contact (`25906e1`, `a3dd1d7`).
+- **The queue triages itself.** `financehub.triage.triage_open` runs on a
+  two-minute beat interval; verified live by seeding, reconciling, then
+  *waiting* — 495 untriaged rows went to 1 without intervention, classified
+  via `random_forest` across all four categories, and the next sweep
+  correctly did nothing in 0.1s. (The 1 is an exception resolved before it
+  was ever triaged; `load_untriaged` only picks OPEN rows.)
 - **The Sec. 11 feedback loop runs end to end in production.** 250 exceptions
   resolved through the real API (RBAC, audit trail, feature capture) → the
   200-label trigger fired → celery trained a forest → the promotion guard
@@ -381,14 +387,6 @@ would be the first labels that make an accuracy claim about the forest mean
 anything, and they are the only thing that lets it exceed the rules rather
 than reproduce them.
 
-### P3 — Triage is not scheduled
-
-`POST /triage` is what turns an opened exception into a categorised one, and
-**nothing calls it automatically** — celery beat only schedules retraining. A
-freshly seeded box shows an untriaged queue until someone calls it by hand.
-Either add it to the beat schedule or have the matching engine call it after
-a reconcile.
-
 ### Deployment hardening — the standing note
 
 TLS is configured on this box (see §3). Two things about it that will bite:
@@ -480,11 +478,14 @@ identity provider in front of the gateway and drops `/auth/token` entirely.
   duplicate lost the other 499 records. Duplicates are now skipped and counted
   as `duplicates_skipped`. Only the deployed service hits this; every test
   constructs a fresh cache, so no fingerprint is ever seen twice in-process.
-- **`exceptionqueue.category` is nullable and routinely null.** The matching
-  engine opens rows untriaged; Subsystem 3 fills the category in at
-  `POST /triage`, which **nothing calls automatically** - celery beat only
-  schedules retraining. A freshly seeded box therefore shows a queue of
-  untriaged exceptions until you call it by hand.
+- **`exceptionqueue.category` is nullable and briefly null.** The matching
+  engine opens rows untriaged and Subsystem 3 fills the category in. Beat
+  sweeps every two minutes, so a row can legitimately be seen with
+  `category = NULL` in the window between a reconcile and the next sweep -
+  the dashboard renders those as "Untriaged" rather than crashing on them
+  (it used to crash; see `25906e1`). A sweep of 494 rows took 51s against
+  that 120s interval, so the headroom is real but not enormous; raise
+  `TRIAGE_BATCH_LIMIT` or the interval together, not one alone.
 - **Applying `schema.sql` as `postgres` silently breaks re-runnability.** The
   tables come out owned by `postgres`; `GRANT ALL` gives the app role DML but
   not ownership, and DDL needs ownership — so the app's own `DATABASE_URL`
