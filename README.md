@@ -1,5 +1,9 @@
 # FinanceHub
 
+> **Picking this up cold?** Read [HANDOFF.md](HANDOFF.md) first. It records what
+> is genuinely verified versus what only looks verified, the invariants that
+> must not be broken, and what to build next in priority order.
+
 Automated Financial Transaction Reconciliation and Reporting System.
 Built to [build.md](build%20%281%29.md) — four subsystems over RESTful APIs,
 backed by one PostgreSQL database as the single source of truth.
