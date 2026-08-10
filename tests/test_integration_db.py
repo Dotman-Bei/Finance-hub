@@ -436,3 +436,62 @@ def test_audit_actor_activity(session):
 
     actors = {row["actor"] for row in actor_activity(session)}
     assert "named.actor@financehub.io" in actors
+
+
+def test_nominated_counterparts_survive_the_jsonb_round_trip(session):
+    """The classifier must actually receive the counterparts the matcher named.
+
+    Regression for a bug that made Subsystem 3 useless in the deployed system
+    while every in-process test stayed green. `persistence.py` stringifies
+    candidate ids into `suggested_resolution` because JSONB has no UUID type;
+    `load_untriaged` then looked them up in a dict keyed by the ORM's UUID
+    objects, so `cid in transactions` was always False and every counterpart
+    was silently dropped. The classifier saw `counterpart_count == 0` for
+    every row and answered MISSING_REFERENCE_CODE for all of them, collapsing
+    all four categories into one.
+
+    Nothing caught it because this function is the only path that round-trips
+    ids through Postgres: verify_corpus.py and the unit tests build the
+    counterpart list in memory from UUIDs they just generated.
+    """
+    from services.exception_handler.app.feedback import load_untriaged
+
+    obligation = _txn(session, external_id=f"ERP-{uuid.uuid4().hex[:8]}", amount=1000.00)
+    leg = _txn(
+        session,
+        external_id=f"BNK-{uuid.uuid4().hex[:8]}",
+        source_type="bank_api",
+        amount=600.00,
+    )
+
+    session.add(
+        ExceptionQueue(
+            transaction_id=obligation.id,
+            category=None,  # the matching engine opens rows untriaged
+            state=ExceptionState.OPEN,
+            classifier_confidence=0.55,
+            suggested_resolution={
+                "matching_engine": {
+                    "reason": "below confidence threshold",
+                    "best_counterpart_id": str(leg.id),
+                    "candidate_ids": [str(leg.id)],
+                    "best_confidence": 0.55,
+                }
+            },
+        )
+    )
+    session.flush()
+
+    loaded = [
+        row for row in load_untriaged(session, limit=500)
+        if row["transaction"]["external_id"] == obligation.external_id
+    ]
+    assert len(loaded) == 1, "the untriaged exception was not loaded at all"
+
+    counterparts = loaded[0]["counterparts"]
+    assert counterparts, (
+        "no counterparts reached the classifier even though candidate_ids named one; "
+        "the JSONB string ids are not matching the ORM's UUID keys"
+    )
+    assert counterparts[0]["external_id"] == leg.external_id
+    assert float(counterparts[0]["amount"]) == 600.00

@@ -39,6 +39,30 @@ export const CATEGORY_META = {
   },
 }
 
+/**
+ * An exception the matching engine has opened but Subsystem 3 has not
+ * classified yet.
+ *
+ * `exceptionqueue.category` is nullable by design — the matching engine writes
+ * the row with `category=None` and the exception handler fills it in at triage
+ * — so a freshly reconciled queue is legitimately full of these. Reading
+ * `CATEGORY_META[null]` for one used to return undefined and take the whole
+ * panel down with `Cannot read properties of undefined`, which is how a real
+ * state of the system became a blank dashboard.
+ */
+export const UNTRIAGED_META = {
+  label: 'Untriaged',
+  short: 'Untriaged',
+  pathway: 'Awaiting classification by the exception handler',
+  color: '#94A3B8',
+  chip: 'border-outline-variant bg-surface-dim text-on-surface-variant',
+}
+
+/** Category metadata that is safe to read for any value the API can return. */
+export function categoryMeta(category) {
+  return CATEGORY_META[category] ?? UNTRIAGED_META
+}
+
 export const EXCEPTION_STATES = {
   OPEN: { label: 'Open', chip: 'border-outline-variant bg-surface-dim text-on-surface-variant' },
   SUGGESTED: { label: 'Suggested', chip: 'border-[#FDE6C7] bg-[#FFF9F0] text-[#A9651A]' },

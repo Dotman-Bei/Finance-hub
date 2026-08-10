@@ -15,7 +15,7 @@ import { ArcElement, Chart as ChartJS, Legend, Tooltip as ChartTooltip } from 'c
 import { Doughnut } from 'react-chartjs-2'
 
 import Icon from './ui/Icon'
-import { CATEGORY_META, RANGE_PRESETS } from '../lib/constants'
+import { CATEGORY_META, RANGE_PRESETS, categoryMeta } from '../lib/constants'
 import { compact, integer, percent, shortDate } from '../lib/format'
 
 ChartJS.register(ArcElement, ChartTooltip, Legend)
@@ -101,11 +101,11 @@ export default function MatchRateChart({ series = [], categories = [], loading }
 
   const doughnut = useMemo(
     () => ({
-      labels: categories.map((c) => CATEGORY_META[c.category].label),
+      labels: categories.map((c) => categoryMeta(c.category).label),
       datasets: [
         {
           data: categories.map((c) => c.count),
-          backgroundColor: categories.map((c) => CATEGORY_META[c.category].color),
+          backgroundColor: categories.map((c) => categoryMeta(c.category).color),
           borderColor: '#FFFFFF',
           borderWidth: 3,
           hoverOffset: 8,
@@ -302,7 +302,7 @@ export default function MatchRateChart({ series = [], categories = [], loading }
             <ul className="space-y-2.5">
               {categories.map((entry) => {
                 const total = categories.reduce((a, c) => a + c.count, 0) || 1
-                const meta = CATEGORY_META[entry.category]
+                const meta = categoryMeta(entry.category)
                 return (
                   <li key={entry.category}>
                     <div className="flex items-center justify-between gap-4">

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import Icon from './ui/Icon'
-import { CATEGORY_META, EXCEPTION_CATEGORIES, EXCEPTION_STATES } from '../lib/constants'
+import { CATEGORY_META, EXCEPTION_CATEGORIES, EXCEPTION_STATES, categoryMeta } from '../lib/constants'
 import { currency, relativeTime, shortId } from '../lib/format'
 
 const STATE_FILTERS = ['ALL', 'OPEN', 'SUGGESTED', 'RESOLVED', 'REJECTED']
@@ -31,7 +31,7 @@ function ResolutionDrawer({ item, canResolve, busy, onDecide }) {
   const [note, setNote] = useState('')
 
   const suggestion = item.suggested_resolution
-  const meta = CATEGORY_META[item.category]
+  const meta = categoryMeta(item.category)
   const settled = item.state === 'RESOLVED' || item.state === 'REJECTED'
 
   return (
@@ -174,7 +174,7 @@ function ResolutionDrawer({ item, canResolve, busy, onDecide }) {
 }
 
 function Row({ item, expanded, onToggle, canResolve, busy, onDecide, isNew }) {
-  const meta = CATEGORY_META[item.category]
+  const meta = categoryMeta(item.category)
   const state = EXCEPTION_STATES[item.state]
 
   return (

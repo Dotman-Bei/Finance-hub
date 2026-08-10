@@ -87,14 +87,27 @@ def load_untriaged(session: Session, limit: int = 500) -> list[dict[str, Any]]:
             counterpart_ids.add(candidate)
 
     wanted = transaction_ids | counterpart_ids
+    # Keyed by `str(id)`, not by `id`. The transaction ids come off the ORM as
+    # UUID objects while the nominated counterpart ids come out of JSONB as
+    # strings - persistence.py stringifies them deliberately, because JSONB has
+    # no UUID type. Keying on the raw value made `cid in transactions` compare
+    # a str against UUID keys, which is always False, so every nominated
+    # counterpart was silently dropped and the classifier only ever saw
+    # `counterpart_count == 0`. That collapses all four categories into the
+    # "no counterpart was nominated" fallback, MISSING_REFERENCE_CODE.
+    #
+    # It survived every test because nothing but the deployed service reaches
+    # the classifier through this function: verify_corpus.py and the unit tests
+    # build the counterpart list themselves, keyed by the UUIDs they just
+    # generated, and never round-trip through Postgres or JSONB.
     transactions = {
-        txn.id: txn
+        str(txn.id): txn
         for txn in session.query(Transaction).filter(Transaction.id.in_(wanted)).all()
     }
 
     payload = []
     for row in queue_rows:
-        txn = transactions.get(row.transaction_id)
+        txn = transactions.get(str(row.transaction_id))
         if txn is None:
             # A queue row whose transaction has been deleted cannot be triaged;
             # skipping it loudly is better than fabricating a placeholder.
@@ -102,9 +115,9 @@ def load_untriaged(session: Session, limit: int = 500) -> list[dict[str, Any]]:
             continue
 
         counterparts = [
-            _row_to_dict(transactions[cid])
+            _row_to_dict(transactions[str(cid)])
             for cid in _nominated_ids(row)
-            if cid in transactions
+            if str(cid) in transactions
         ]
 
         payload.append(
