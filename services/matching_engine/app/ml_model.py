@@ -92,6 +92,13 @@ DEFAULT_MAX_CANDIDATES_PER_ROW = 6
 MIN_LEG_SHARE = 0.05
 MAX_LEG_SHARE = 0.95
 
+#: Blocking-key shape. Bank narratives are truncated to a fixed-width field,
+#: and seed.py's mangler cuts at 8 characters minimum, so an 8-character token
+#: prefix survives truncation on both sides. Tokens shorter than 4 characters
+#: ("ltd", "sa", "bv", "pos") are too generic to block on.
+_KEY_PREFIX = 8
+_KEY_MIN_TOKEN = 4
+
 _WHITESPACE = re.compile(r"\s+")
 _NOISE = re.compile(r"[^a-z0-9 ]+")
 
@@ -116,6 +123,49 @@ def normalize_description(text: Any) -> str:
         return ""
     lowered = str(text).lower()
     return _WHITESPACE.sub(" ", _NOISE.sub(" ", lowered)).strip()
+
+
+def blocking_keys(descriptions: list[str], max_document_frequency: float = 0.10) -> list[set[str]]:
+    """Counterparty-ish blocking keys per description, best-effort.
+
+    Standard record-linkage blocking: rather than compare every internal row
+    against every external one, only compare rows that agree on some cheap
+    key. The key wanted here is counterparty identity, which no field carries
+    - it lives inside free-text narrative - so it is approximated from the
+    text itself.
+
+    Two properties of real bank narratives shape this:
+
+    * They are truncated to a fixed-width field, so "Meridian Capital Ltd"
+      arrives as "MERIDIAN LO" or "MERIDIAN CAP". Keys are therefore token
+      *prefixes* (`_KEY_PREFIX` chars), not whole tokens.
+    * They carry channel noise - "POS ", "//REF9931", batch numbers - at
+      unpredictable positions, so every qualifying token yields a key and two
+      rows block together if they share *any* of them, rather than trusting
+      the counterparty to sit at a fixed offset.
+
+    Tokens appearing in more than `max_document_frequency` of the batch are
+    dropped. They are the narrative verbs ("settlement", "invoice") shared by
+    every counterparty, and keeping them would put the whole batch in one
+    block and buy nothing. A real counterparty sits far below that bar; one
+    that does not is a counterparty the blocking cannot help with anyway, and
+    it degrades to the other channels rather than to a wrong answer.
+    """
+    tokenised = [
+        [t[:_KEY_PREFIX] for t in normalize_description(d).split() if len(t) >= _KEY_MIN_TOKEN]
+        for d in descriptions
+    ]
+
+    if not tokenised:
+        return []
+
+    frequency: dict[str, int] = {}
+    for tokens in tokenised:
+        for token in set(tokens):
+            frequency[token] = frequency.get(token, 0) + 1
+
+    ceiling = max(1, int(len(tokenised) * max_document_frequency))
+    return [{t for t in set(tokens) if frequency[t] <= ceiling} for tokens in tokenised]
 
 
 def fuzzy_match(unmatched_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -391,6 +441,19 @@ class FuzzyMatcher:
         The same cost-control shape as `_blocking_candidates`: only the
         `max_block_candidates` nearest by amount survive per internal row, so
         a wide fractional band on a large settlement cannot go quadratic.
+
+        That cap is applied *within a counterparty block* wherever the
+        narratives support one (see `blocking_keys`). Amount alone stops
+        discriminating as the batch grows: the 5-95% band around one
+        obligation fills up with other obligations' legs, and the
+        nearest-by-amount tie-break systematically prefers a stranger's large
+        fraction over the several smaller pieces of the split actually being
+        looked for - all of which have to survive together for the classifier
+        to see multiplicity. Restricting the window to same-counterparty rows
+        first removes that crowding: the pool a leg competes in stops scaling
+        with total batch size and scales with that counterparty's own volume
+        instead. Rows with no usable key fall back to the unrestricted window,
+        which is the pre-existing behaviour.
         """
         if "amount" not in internal.columns or "amount" not in external.columns:
             return set()
@@ -408,6 +471,18 @@ class FuzzyMatcher:
         internal_dates = pd.to_datetime(internal.get("txn_date"), errors="coerce")
         external_dates = pd.to_datetime(external.get("txn_date"), errors="coerce")
 
+        # One shared key space, so a key means the same thing on both sides.
+        internal_descriptions = [str(d) for d in internal.get("description", [""] * len(internal))]
+        external_descriptions = [str(d) for d in external.get("description", [""] * len(external))]
+        all_keys = blocking_keys(internal_descriptions + external_descriptions)
+        internal_keys = all_keys[: len(internal)]
+        external_keys = all_keys[len(internal) :]
+
+        block_index: dict[str, set[int]] = {}
+        for position, keys in enumerate(external_keys):
+            for key in keys:
+                block_index.setdefault(key, set()).add(position)
+
         pairs: set[tuple[int, int]] = set()
 
         for i, amount in enumerate(internal_amounts):
@@ -421,13 +496,42 @@ class FuzzyMatcher:
 
             in_window = order[low:high]
 
+            same_counterparty: set[int] = set()
+            for key in internal_keys[i]:
+                same_counterparty |= block_index.get(key, set())
+            if same_counterparty:
+                blocked = np.array(
+                    [p for p in in_window if int(p) in same_counterparty], dtype=int
+                )
+                if blocked.size:
+                    in_window = blocked
+
             if len(in_window) > max_block_candidates:
-                # Closest to the full amount first - the largest plausible
-                # leg is also the one likeliest to be a genuine partial
-                # payment rather than one piece of a longer split.
-                gaps = np.abs(external_amounts[in_window] - amount)
+                # Ranked by settlement date, not by closeness to the full
+                # amount. Amount closeness is actively the wrong tie-break
+                # here: a split's legs are its *smallest* rows, so preferring
+                # near-full fractions drops exactly the pieces this channel
+                # exists to find, and drops all of them together - one
+                # surviving leg reads as a partial payment, which is the
+                # misclassification being chased. The legs of one settlement
+                # are instead posted within days of each other, so date is
+                # what actually separates them from a stranger's fraction.
+                left_date = internal_dates.iloc[i] if internal_dates is not None else None
+                if left_date is not None and pd.notna(left_date):
+                    deltas = np.array(
+                        [
+                            abs((external_dates.iloc[int(p)] - left_date).days)
+                            if external_dates is not None
+                            and pd.notna(external_dates.iloc[int(p)])
+                            else np.inf
+                            for p in in_window
+                        ],
+                        dtype=float,
+                    )
+                else:
+                    deltas = np.abs(external_amounts[in_window] - amount)
                 in_window = in_window[
-                    np.argpartition(gaps, max_block_candidates)[:max_block_candidates]
+                    np.argpartition(deltas, max_block_candidates)[:max_block_candidates]
                 ]
 
             for position in in_window:
