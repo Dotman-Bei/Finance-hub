@@ -12,6 +12,10 @@
      ##PAGEBREAK   new page
      anything else body text
 #}
+{# A caller that renders without a report_type gets the full document, which
+   is what this template did for every type before the sections became
+   type-specific. Failing instead would make an omitted key an outage. #}
+{%- set report_type = report_type | default('RECONCILIATION_SUMMARY', true) -%}
 ##H1 {{ title }}
 
 Report ID    {{ report_id }}
@@ -37,24 +41,51 @@ unsupervised matching layer, and only pairs scoring at or above the configured
 confidence threshold are posted.
 {%- endif %}
 
+{% if report_type in ('RECONCILIATION_SUMMARY', 'MATCH_RATE_ANALYTICS') %}
+
 ##SPACER
 ##H2 Match-rate analytics
 ##TABLE:match_rate
 
+{% endif %}
+{% if report_type in ('RECONCILIATION_SUMMARY', 'EXCEPTION_LOG') %}
+
 ##SPACER
 ##H2 Exception log
-{% if exceptions -%}
+{% if exceptions %}
 {{ exceptions|length }} exception{{ 's' if exceptions|length != 1 else '' }}
 {{ 'are' if exceptions|length != 1 else 'is' }} listed below with the category
 assigned by the classifier and the resolution pathway proposed for each.
+
 ##TABLE:exceptions
-{%- else -%}
+
+{% else %}
 No exceptions were outstanding in this period.
-{%- endif %}
+
+{% endif %}
+{% endif %}
+{% if report_type in ('RECONCILIATION_SUMMARY', 'EXCEPTION_LOG', 'MATCH_RATE_ANALYTICS') %}
 
 ##SPACER
 ##H2 Category distribution
 ##TABLE:categories
+
+{% endif %}
+{% if report_type == 'AUDIT_TRAIL' %}
+
+##SPACER
+##H2 Audit trail
+Every state change to an exception is written by a database trigger rather than
+by application code, so this list cannot be short of a change that occurred.
+
+##TABLE:audit
+
+##SPACER
+##H2 Activity by actor
+##TABLE:actors
+
+{% endif %}
+{% if report_type in ('RECONCILIATION_SUMMARY', 'AUDIT_TRAIL') %}
 
 ##SPACER
 ##H2 Validation and data quality
@@ -66,6 +97,8 @@ The ingestion pipeline quarantined
 period. Quarantined payloads are retained in full and can be replayed once the
 upstream feed is corrected.
 {%- endif %}
+
+{% endif %}
 
 ##SPACER
 This document was produced by FinanceHub for audit purposes. Its identifier is

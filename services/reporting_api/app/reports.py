@@ -43,6 +43,7 @@ from sqlalchemy.orm import Session
 from shared.models.enums import ExceptionState
 from shared.models.orm import ExceptionQueue, Report, Transaction
 
+from .audit import actor_activity, query_trail
 from .metrics import category_breakdown, kpi_summary, match_rate_series
 
 logger = logging.getLogger(__name__)
@@ -90,8 +91,15 @@ def gather(
     period_start: dt.date | None,
     period_end: dt.date | None,
     exception_limit: int = 200,
+    report_type: str = "RECONCILIATION_SUMMARY",
 ) -> dict[str, Any]:
-    """Everything the template needs, read once."""
+    """Everything the template needs, read once.
+
+    `report_type` decides what is fetched, not just what is shown. The audit
+    trail in particular is not gathered for the other three types: it is the
+    largest query here and reading it to then not render it would make every
+    report pay for the one that needs it.
+    """
     kpi = kpi_summary(session)
     series = match_rate_series(session, period_start, period_end)
     categories = category_breakdown(session)
@@ -128,11 +136,22 @@ def gather(
             }
         )
 
+    audit: list[dict[str, Any]] = []
+    actors: list[dict[str, Any]] = []
+    if report_type == "AUDIT_TRAIL":
+        # A report titled "Full Audit Trail" that carried no audit rows was
+        # the clearest symptom that report_type reached nothing but the title.
+        audit = query_trail(session, limit=exception_limit)
+        actors = actor_activity(session, limit=25)
+
     return {
         "kpi": kpi,
         "series": series,
         "categories": categories,
         "exceptions": exceptions,
+        "audit": audit,
+        "actors": actors,
+        "report_type": report_type,
     }
 
 
@@ -199,6 +218,42 @@ def _exceptions_table(data: dict[str, Any]) -> list[list[str]]:
     return table
 
 
+def _audit_table(data: dict[str, Any]) -> list[list[str]]:
+    """The audit trail itself - only populated for AUDIT_TRAIL reports."""
+    table = [["When", "Entity", "Action", "Actor", "Changed"]]
+    for row in data.get("audit", [])[:60]:
+        changed = ", ".join(
+            c.get("field", "") for c in (row.get("changed_fields") or [])[:3]
+        ) or "—"
+        table.append([
+            (row.get("created_at") or "")[:19].replace("T", " "),
+            row.get("entity_type", "—"),
+            row.get("action", "—"),
+            row.get("actor", "—"),
+            changed[:44] + ("…" if len(changed) > 44 else ""),
+        ])
+    if len(data.get("audit", [])) > 60:
+        table.append(["", f"... and {len(data['audit']) - 60} more", "", "", ""])
+    if len(table) == 1:
+        table.append(["—", "no audit rows in this period", "", "", ""])
+    return table
+
+
+def _actors_table(data: dict[str, Any]) -> list[list[str]]:
+    """Who acted, and how often. Answers 'who touched this' at a glance."""
+    table = [["Actor", "Actions", "First seen", "Last seen"]]
+    for row in data.get("actors", [])[:25]:
+        table.append([
+            str(row.get("actor", "—")),
+            str(row.get("actions", row.get("count", "—"))),
+            str(row.get("first_seen", "—"))[:19].replace("T", " "),
+            str(row.get("last_seen", "—"))[:19].replace("T", " "),
+        ])
+    if len(table) == 1:
+        table.append(["—", "no activity in this period", "", ""])
+    return table
+
+
 def _categories_table(data: dict[str, Any]) -> list[list[str]]:
     total = sum(c["count"] for c in data["categories"]) or 1
     table = [["Category", "Count", "Share", "Exposure"]]
@@ -228,6 +283,8 @@ TABLES = {
     "kpi": _kpi_table,
     "match_rate": _match_rate_table,
     "exceptions": _exceptions_table,
+    "audit": _audit_table,
+    "actors": _actors_table,
     "categories": _categories_table,
     "validation": _validation_table,
 }
@@ -352,7 +409,7 @@ def generate(
             f"{sorted(REPORT_TYPES)}"
         )
 
-    data = gather(session, period_start, period_end)
+    data = gather(session, period_start, period_end, report_type=report_type)
 
     row = Report(
         name=title or f"{REPORT_TYPES[report_type]} — {period_start or 'inception'} to "

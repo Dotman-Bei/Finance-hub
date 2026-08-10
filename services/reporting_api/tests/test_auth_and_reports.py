@@ -25,7 +25,7 @@ from services.reporting_api.app.auth import (
     decode_token,
     issue_token,
 )
-from services.reporting_api.app.reports import REPORT_TYPES, render_pdf
+from services.reporting_api.app.reports import REPORT_TYPES, _env, render_pdf
 
 # ── RBAC (Sec. 3.4.1) ────────────────────────────────────────────────────
 
@@ -259,3 +259,59 @@ def test_rule_ml_split_reports_the_deterministic_share():
     text = reports_module._rule_ml_split(data["series"])
     assert "deterministic" in text
     assert reports_module._rule_ml_split([]) == "—"
+
+
+@pytest.mark.parametrize(
+    "report_type,expected,forbidden",
+    [
+        ("EXCEPTION_LOG", "Exception log", "Match-rate analytics"),
+        ("MATCH_RATE_ANALYTICS", "Match-rate analytics", "Exception log"),
+        ("AUDIT_TRAIL", "Audit trail", "Exception log"),
+    ],
+)
+def test_report_type_changes_the_content_not_only_the_title(
+    report_type, expected, forbidden
+):
+    """Four report types must not be one report with four headings.
+
+    They were: `gather` and `render_pdf` never received `report_type`, so it
+    reached the row name and the stored parameters and nothing else. All four
+    rendered the identical document - most visibly a "Full Audit Trail" that
+    contained no audit rows at all, because nothing ever queried them.
+    """
+    data = {**_data(), "report_type": report_type, "audit": [], "actors": []}
+    script = _env.get_template("reconciliation_summary.txt.j2").render(
+        **_context(), **data
+    )
+
+    assert expected in script, f"{report_type} is missing its own section"
+    assert forbidden not in script, (
+        f"{report_type} still carries {forbidden!r} - the type is not selecting sections"
+    )
+    # Every directive must own its line; the template is line-oriented and
+    # trim_blocks eats the newline after each block tag.
+    assert not [ln for ln in script.splitlines() if ln.count("##") > 1]
+
+
+def test_audit_trail_report_actually_queries_the_audit_trail():
+    """The one that was most clearly wrong: a Full Audit Trail with no rows."""
+    data = {
+        **_data(),
+        "report_type": "AUDIT_TRAIL",
+        "audit": [{
+            "created_at": "2026-08-10T12:00:00", "entity_type": "exceptionqueue",
+            "action": "UPDATE", "actor": "reviewer",
+            "changed_fields": [{"field": "state"}],
+        }],
+        "actors": [{"actor": "reviewer", "actions": 1,
+                    "first_seen": "2026-08-10T12:00:00",
+                    "last_seen": "2026-08-10T12:00:00"}],
+    }
+    pdf = render_pdf(_context(), data)
+    assert pdf.startswith(b"%PDF-")
+
+    script = _env.get_template("reconciliation_summary.txt.j2").render(
+        **_context(), **data
+    )
+    assert "##TABLE:audit" in script
+    assert "##TABLE:actors" in script
