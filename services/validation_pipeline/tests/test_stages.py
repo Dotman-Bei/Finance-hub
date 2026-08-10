@@ -373,3 +373,62 @@ def test_cached_verdict_is_reused_not_recomputed():
     assert second.from_cache and not first.from_cache
     assert second.status is first.status is ValidationState.QUARANTINED
     assert second.violations == first.violations
+
+
+def test_resubmitting_a_valid_record_does_not_crash_persistence():
+    """A duplicate submission must be skipped, not re-persisted.
+
+    Regression: `to_cache_entry` deliberately caches the verdict alone and
+    never the parsed Transaction, so a cached PASSED decision arrives at
+    `persist_batch` with `transaction=None`. It was handed straight to
+    `_transaction_row`, whose assertion then took down the entire batch with a
+    500. Re-submitting a record is ordinary - a retry, a replayed feed, a
+    re-run seeder - so an everyday duplicate became an outage.
+
+    Uses a stub session because the defect fires before any database work;
+    keeping it here means it runs without Postgres.
+    """
+    from services.validation_pipeline.app.quarantine import persist_batch
+
+    class StubSession:
+        def __init__(self):
+            self.added = []
+            self.commits = 0
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            self.commits += 1
+
+    class DictCache:
+        def __init__(self):
+            self.store = {}
+
+        def get(self, fp):
+            return self.store.get(fp)
+
+        def set(self, fp, decision):
+            self.store[fp] = decision
+
+    pipe = ValidationPipeline(cache=DictCache())
+    payload = good_payload()
+
+    first = pipe.validate_batch([payload], as_of=TODAY)
+    assert first.decisions[0].passed and not first.decisions[0].from_cache
+
+    session = StubSession()
+    written = persist_batch(session, first)
+    assert written["transactions_inserted"] == 1
+    assert written["duplicates_skipped"] == 0
+
+    # The same payload again: the verdict is cached, so nothing new is written.
+    second = pipe.validate_batch([payload], as_of=TODAY)
+    assert second.decisions[0].from_cache
+    assert second.decisions[0].transaction is None
+
+    repeat = StubSession()
+    written_again = persist_batch(repeat, second)  # used to raise AssertionError
+    assert written_again["transactions_inserted"] == 0
+    assert written_again["duplicates_skipped"] == 1
+    assert repeat.added == [], "a duplicate must not write any row"

@@ -88,8 +88,23 @@ def persist_batch(
     written_transactions = 0
     written_quarantine = 0
     alerts_emitted = 0
+    duplicates = 0
 
     for decision in result.decisions:
+        # A cached verdict means this exact payload was validated - and
+        # persisted - on an earlier ingestion, so there is nothing to write.
+        # Skipping is not an optimisation, it is the only correct action:
+        # `to_cache_entry` deliberately stores the verdict alone and never the
+        # parsed Transaction (its generated id must stay unique per
+        # ingestion), so a cached PASSED decision reaches here with
+        # `transaction=None` and re-persisting it used to trip
+        # `_transaction_row`'s assertion and 500 the whole batch. Re-submitting
+        # a record is normal - a retry, a replayed feed, a re-run seed - so
+        # that turned an ordinary duplicate into an outage.
+        if decision.from_cache:
+            duplicates += 1
+            continue
+
         if decision.passed:
             row = _transaction_row(decision)
             session.add(row)
@@ -107,6 +122,10 @@ def persist_batch(
     # then rolled back would put a phantom item on the dashboard.
     if cache is not None:
         for decision in result.quarantined:
+            # A duplicate was alerted on when it was first seen; re-announcing
+            # it would put the same item on the dashboard twice.
+            if decision.from_cache:
+                continue
             if cache.publish_quarantine_alert(_alert(decision)):
                 alerts_emitted += 1
 
@@ -114,6 +133,7 @@ def persist_batch(
         transactions_inserted=written_transactions,
         quarantined=written_quarantine,
         alerts_emitted=alerts_emitted,
+        duplicates_skipped=duplicates,
     )
 
 
