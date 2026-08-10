@@ -69,6 +69,19 @@ DEFAULT_N_NEIGHBORS = 5
 #: rank first, which was usually the wrong candidate.
 DEFAULT_DATE_TOLERANCE_DAYS = 20
 
+#: How many external candidates Channel 1 proposes per internal row, at most.
+#: A split settlement's legs never clear Channel 2 (each leg is a fraction of
+#: the obligation, so amount_proximity's relative tolerance always scores it
+#: 0), so this cap is their only path to being nominated at all - and a split
+#: is 2 to 4 legs. At the previous cap of 3, a 4-leg split could not possibly
+#: get all its legs proposed even with a perfect ranking, and any 2- or 3-leg
+#: split competing against a same-narrative decoy (a handful of repeated
+#: descriptions is normal in real remittance data too, not just this corpus)
+#: lost a slot to it. Raised to match MAX_CANDIDATES in pipeline.py, which is
+#: what actually consumes these - proposing fewer candidates than the
+#: downstream co-settling logic is willing to keep serves nothing.
+DEFAULT_MAX_CANDIDATES_PER_ROW = 6
+
 _WHITESPACE = re.compile(r"\s+")
 _NOISE = re.compile(r"[^a-z0-9 ]+")
 
@@ -346,7 +359,7 @@ class FuzzyMatcher:
         self,
         internal: pd.DataFrame,
         external: pd.DataFrame,
-        max_candidates_per_row: int = 3,
+        max_candidates_per_row: int = DEFAULT_MAX_CANDIDATES_PER_ROW,
         amount_tolerance: float = 0.20,
         date_tolerance_days: int = DEFAULT_DATE_TOLERANCE_DAYS,
     ) -> tuple[list[CandidatePair], set[int], set[int]]:
