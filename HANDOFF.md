@@ -4,15 +4,16 @@
 anything. It records what exists, what is genuinely verified, what only *looks*
 verified, and what to build next in priority order.
 
-Last updated 2026-08-10 at commit `78686a9`. Branch `main`, pushed to
+Last updated 2026-08-10. Branch `main`, pushed to
 `github.com/Dotman-Bei/Finance-hub`.
 
 **What changed this session:** the system was deployed and run for real on a
-VPS for the first time (§3 is substantially rewritten as a result), two boot
-bugs were fixed, `TIMING_DIFFERENCE` went 0% → 100%, `SPLIT_SETTLEMENT` went
-16% → 71% at 5000-pair scale, accuracy grading became
-`verify_corpus.py --accuracy`, and `make chapter4` now emits the whole results
-table in one command.
+VPS for the first time, then driven in a real browser — §3 is substantially
+rewritten as a result. Five bugs found and fixed, all of them invisible to the
+test suite because they only exist once the thing runs as services against a
+real database. `TIMING_DIFFERENCE` went 0% → 100%, `SPLIT_SETTLEMENT` 16% →
+71% at 5000-pair scale, accuracy grading became `verify_corpus.py --accuracy`,
+and `make chapter4` now emits the whole results table in one command.
 
 ---
 
@@ -92,16 +93,21 @@ substantially on 2026-08-10: the system has now been run for real.**
   content-type).
 - Both corpora graded end-to-end through the **real** validation, matching and
   classifier code via `tools/verify_corpus.py`.
+- **The dashboard renders live data in a real browser** — 16/16 checks in
+  `tools/dashboard_check.mjs`, zero uncaught page exceptions: sign-in, KPI
+  tiles carrying real figures, the match-rate trend chart, the categorised
+  exception queue, a live `exception.created` burst arriving over the
+  WebSocket during a reconcile, and the Auditor role being offered no Resolve
+  control. This found three real bugs on first contact (`25906e1`, `a3dd1d7`).
 
 ### Still NOT verified
 
 | Thing | Status |
 |---|---|
 | `docker compose up` | **Never run.** Docker is not installed anywhere in play |
-| The dashboard **rendering** live data | The SPA is served and the APIs behind it answer, but no browser has been pointed at it |
-| WebSocket `/ws/exceptions` end-to-end | Unit-tested and proxied by nginx; never observed carrying a live event |
 | Kafka ingestion | Never run against a live broker (`CONSUME_KAFKA=false` by design here) |
 | TLS | Not configured — the sign-in key and every JWT cross the network in clear text |
+| The trained Random Forest in production | Every reported number is the cold-start bootstrap engine; nothing has trained the forest on the live box |
 
 The old warning that "the assembled system has never actually run as
 services" is now **obsolete**. It found two real bugs on first boot, both
@@ -160,6 +166,7 @@ FINALS/
 │   ├── real_ledger.py      # real obligations from UCI Online Retail II
 │   ├── verify_corpus.py    # grade a corpus through the real code (--accuracy)
 │   ├── chapter4.py         # every gate + corpus grading -> one results table
+│   ├── dashboard_check.mjs # drives the deployed dashboard in a real browser
 │   └── requirements.txt    # openpyxl — tools only, not services
 ├── deploy/                 # bare-metal VPS: provision.sh, systemd, nginx
 └── tests/                  # cross-subsystem e2e + integration
@@ -293,32 +300,20 @@ fix**, so it was left alone. Decide it deliberately before touching it.
 **P0–P5 from the previous handoff are done** (2026-08-10). What follows is
 what is left, renumbered.
 
-### P0 — Look at the dashboard in a browser
-
-The only hop never exercised. The SPA is served by nginx at
-`http://169.58.153.9/`, the APIs behind it answer, auth and RBAC are verified
-by curl — but nobody has watched it render. Sign-in key:
-`grep SERVICE_API_KEY /opt/financehub/.env`. Expect the same class of bug the
-first real boot produced: things that unit-test clean and break on contact.
-
-While there, confirm the WebSocket carries a live event (open the dashboard,
-run a reconcile, watch the exception feed) — that is the other never-observed
-path.
-
-### P1 — TLS, before anyone else is given the URL
+### P0 — TLS, before anyone else is given the URL
 
 `certbot --nginx` needs a domain and there isn't one pointed at the box yet.
 Until then the sign-in key and every JWT cross the network in clear text. See
 §8's old P6 note below, which still stands.
 
-### P2 — Decide the precision gate deliberately
+### P1 — Decide the precision gate deliberately
 
 See §7. Pre-existing, deterministic, one genuinely ambiguous pair out of 95,
 and the "fix" is an engine design decision with a real recall cost. It should
 be *decided*, not left failing indefinitely — a permanently red gate trains
 everyone to ignore the suite.
 
-### P3 — Classification accuracy at scale
+### P2 — Classification accuracy at scale
 
 72.45% at 5000 pairs against 90.00% at 800. Much of the gap is corpus
 vocabulary (see §7), so the two honest options are different in kind:
@@ -335,7 +330,7 @@ vocabulary (see §7), so the two honest options are different in kind:
   `randint(0, 4)` back off the generator, which is fitting the corpus rather
   than the phenomenon. Do not redo those two experiments.
 
-### P4 — Train the forest on real feedback
+### P3 — Train the forest on real feedback
 
 Everything above measures the **bootstrap rules**. The forest gates at macro
 F1 1.00 vs bootstrap 0.89, so the numbers in §7 are a floor, not a ceiling.
@@ -416,6 +411,18 @@ identity provider in front of the gateway and drops `/auth/token` entirely.
 - **The 62% clean archetype mix is deliberate.** A flat 1-in-6 spread puts two
   thirds of the corpus in the exception queue and shows a ~25% match rate, which
   measures the corpus rather than the engine.
+- **A cached verdict carries no parsed Transaction.** `to_cache_entry` stores
+  the verdict alone on purpose, so a *re-submitted* record reaches
+  `persist_batch` as PASSED with `transaction=None`. It used to trip an
+  assertion and 500 the whole batch - and the batch commits as a unit, so one
+  duplicate lost the other 499 records. Duplicates are now skipped and counted
+  as `duplicates_skipped`. Only the deployed service hits this; every test
+  constructs a fresh cache, so no fingerprint is ever seen twice in-process.
+- **`exceptionqueue.category` is nullable and routinely null.** The matching
+  engine opens rows untriaged; Subsystem 3 fills the category in at
+  `POST /triage`, which **nothing calls automatically** - celery beat only
+  schedules retraining. A freshly seeded box therefore shows a queue of
+  untriaged exceptions until you call it by hand.
 - **Applying `schema.sql` as `postgres` silently breaks re-runnability.** The
   tables come out owned by `postgres`; `GRANT ALL` gives the app role DML but
   not ownership, and DDL needs ownership — so the app's own `DATABASE_URL`
