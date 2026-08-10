@@ -57,6 +57,18 @@ DEFAULT_EPS = 0.4
 DEFAULT_MIN_SAMPLES = 2
 DEFAULT_N_NEIGHBORS = 5
 
+#: A same-amount pair posted this many days apart is still one settlement, not
+#: two unrelated transactions. 20, not the previous 10, because a genuine
+#: timing difference (bank processing lag, holidays, period-end drift) was
+#: measured going out that far and the blocking channel is what is supposed to
+#: catch it on amount+date alone - a real pair with an identical description
+#: never needed this channel, only the ones the ML text similarity misses in a
+#: description-heavy batch with a handful of repeated narratives. At 10 the
+#: channel silently missed every pair posted 11-20 days apart and TIMING_
+#: DIFFERENCE fell back on whatever Channel 1's tied cosine scores happened to
+#: rank first, which was usually the wrong candidate.
+DEFAULT_DATE_TOLERANCE_DAYS = 20
+
 _WHITESPACE = re.compile(r"\s+")
 _NOISE = re.compile(r"[^a-z0-9 ]+")
 
@@ -336,7 +348,7 @@ class FuzzyMatcher:
         external: pd.DataFrame,
         max_candidates_per_row: int = 3,
         amount_tolerance: float = 0.20,
-        date_tolerance_days: int = 10,
+        date_tolerance_days: int = DEFAULT_DATE_TOLERANCE_DAYS,
     ) -> tuple[list[CandidatePair], set[int], set[int]]:
         """Propose internal-to-external pairs.
 
