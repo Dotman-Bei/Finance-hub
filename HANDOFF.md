@@ -4,8 +4,15 @@
 anything. It records what exists, what is genuinely verified, what only *looks*
 verified, and what to build next in priority order.
 
-Last updated at commit `6268934`. Branch `main`, pushed to
+Last updated 2026-08-10 at commit `78686a9`. Branch `main`, pushed to
 `github.com/Dotman-Bei/Finance-hub`.
+
+**What changed this session:** the system was deployed and run for real on a
+VPS for the first time (§3 is substantially rewritten as a result), two boot
+bugs were fixed, `TIMING_DIFFERENCE` went 0% → 100%, `SPLIT_SETTLEMENT` went
+16% → 71% at 5000-pair scale, accuracy grading became
+`verify_corpus.py --accuracy`, and `make chapter4` now emits the whole results
+table in one command.
 
 ---
 
@@ -35,6 +42,14 @@ build.md's phases 0–6 are complete. There is no Phase 7. Everything since has
 been closing gaps found by actually exercising the thing.
 
 ```
+78686a9  Add tools/chapter4.py: one command, one results table
+002783e  Block fractional candidates by counterparty: fixes the P4 scale collapse
+d921d64  Add fraction-blocking Channel 3 for split/partial-payment legs
+46eba80  Raise max_candidates_per_row: SPLIT_SETTLEMENT was starved of its own legs
+439f3be  Fold accuracy grading into verify_corpus.py as --accuracy
+3ff48c6  Fix TIMING_DIFFERENCE: 0% classification accuracy on genuine timing pairs
+260b35d  Fix two bugs found running the system live for the first time
+e6f02a0  Add HANDOFF.md: state, invariants and priorities for the next session
 6268934  Draw obligations from a real corpus; add corpus verification
 1202bef  Add deploy/: bare-metal VPS deployment, no Docker
 956b5de  Add the sign-in flow: the dashboard could not authenticate at all
@@ -45,39 +60,52 @@ been closing gaps found by actually exercising the thing.
 3271be7  FinanceHub: automated reconciliation system, phases 0-5
 ```
 
-**290 tests, suite green.** One integration test auto-skips locally (no
-Postgres) and CI fails the build if it skips.
+**307 tests, one failing.** The count rose from 290 because
+`tests/test_integration_db.py` no longer skips — with a reachable PostgreSQL
+its 18 tests run individually instead of the file skipping as one. The
+failure is `test_precision_meets_target`; see §7.
 
 ---
 
 ## 3. Verified vs. assumed — read this before claiming anything works
 
-This distinction matters more than any other section here.
+This distinction matters more than any other section here. **It changed
+substantially on 2026-08-10: the system has now been run for real.**
 
 ### Genuinely verified
 
-- 290 tests pass on Python 3.12.3 (Windows)
-- Frontend: `npm ci`, `npm run lint`, `npm run build` all clean
+- **The whole system runs as services on a real VPS** (Ubuntu 24.04.4,
+  `169.58.153.9`). `deploy/provision.sh` ran end to end; all six systemd
+  units, nginx, PostgreSQL and Redis are active.
+- **Data crosses every hop for real**: ~4,750 records seeded through
+  `POST /validate` over HTTP, 4,347 rows in PostgreSQL, 60 quarantined,
+  reconciliation run via `POST /reconcile`, exceptions opened, one resolved
+  through the API.
+- **RBAC is enforced**: an `AUDITOR` token is refused with
+  `403 Role AUDITOR is not permitted to resolve_exceptions`; a
+  `FINANCE_MANAGER` token succeeds. Wrong API key → 401.
+- **The audit trigger fires on real UPDATEs** — verified by reading the
+  `audittrail` row written by that resolve.
+- **All 18 integration tests pass against real PostgreSQL 16.14**, not CI-only.
+- nginx serves the built SPA and keeps `/health`, `/stats`, `/audit`
+  unreachable from outside (they fall through to the SPA, verified by
+  content-type).
 - Both corpora graded end-to-end through the **real** validation, matching and
-  classifier code via `tools/verify_corpus.py`
-- `provision.sh` passes `bash -n`; every `ExecStart` path and module it names exists
-- Docker installer downloaded and signature-verified (Docker Inc, valid)
+  classifier code via `tools/verify_corpus.py`.
 
-### NOT verified — do not assume these work
+### Still NOT verified
 
 | Thing | Status |
 |---|---|
-| `docker compose up` | **Never run.** Docker is not installed on the dev machine |
-| `deploy/provision.sh` | **Never run on Linux.** Syntax-checked only |
-| The dashboard rendering live data | **Never seen.** No browser has ever loaded it against a running gateway |
-| WebSocket `/ws/exceptions` | Unit-tested only; never exercised service-to-service |
-| Service-to-service HTTP hops | Never run; everything so far is in-process function calls |
-| Kafka ingestion | Never run against a live broker |
-| The audit trigger | CI-only (needs real PostgreSQL) |
+| `docker compose up` | **Never run.** Docker is not installed anywhere in play |
+| The dashboard **rendering** live data | The SPA is served and the APIs behind it answer, but no browser has been pointed at it |
+| WebSocket `/ws/exceptions` end-to-end | Unit-tested and proxied by nginx; never observed carrying a live event |
+| Kafka ingestion | Never run against a live broker (`CONSUME_KAFKA=false` by design here) |
+| TLS | Not configured — the sign-in key and every JWT cross the network in clear text |
 
-**The single largest risk to this project is that the assembled system has
-never actually run as services.** Everything measured so far comes from calling
-the pipelines directly in Python. Expect real bugs on first boot.
+The old warning that "the assembled system has never actually run as
+services" is now **obsolete**. It found two real bugs on first boot, both
+fixed in `260b35d`; see §7.
 
 ---
 
@@ -130,7 +158,8 @@ FINALS/
 ├── tools/
 │   ├── seed.py             # two-sided corpus + answer key
 │   ├── real_ledger.py      # real obligations from UCI Online Retail II
-│   ├── verify_corpus.py    # grade a corpus through the real code
+│   ├── verify_corpus.py    # grade a corpus through the real code (--accuracy)
+│   ├── chapter4.py         # every gate + corpus grading -> one results table
 │   └── requirements.txt    # openpyxl — tools only, not services
 ├── deploy/                 # bare-metal VPS: provision.sh, systemd, nginx
 └── tests/                  # cross-subsystem e2e + integration
@@ -148,6 +177,10 @@ make seed n=2000               # synthetic, to files
 make seed-real d=online_retail_II.zip n=2000   # real obligations
 make seed-http n=2000          # POST to a running validation pipeline
 make verify                    # grade data/seed against its answer key
+
+# results
+make chapter4                  # gates + corpus grading + the objectives table
+make chapter4 n=5000           # at the sample size worth defending
 ```
 
 **`tools/seed.py`** emits *raw vendor-shaped* payloads — ERP as CSV, bank as
@@ -166,7 +199,16 @@ pip install -r tools/requirements.txt
 ```
 
 **`tools/verify_corpus.py`** runs a corpus back through the real code and exits
-non-zero if any exception category proves unreachable.
+non-zero if any exception category proves unreachable. `--accuracy` adds the
+per-archetype classification grading described in §7.
+
+**`tools/chapter4.py`** (`make chapter4`) runs the whole test suite plus the
+corpus grading and prints one table mapped to the four objectives. It computes
+nothing itself — gate results are read from pytest's JUnit XML and corpus
+figures come from `verify_corpus.verify()` — so it cannot report a number the
+suite would disagree with. A gate that stops being collected shows as MISSING
+rather than disappearing; a skipped gate is reported as skipped, never as
+passed.
 
 ---
 
@@ -183,100 +225,163 @@ From `tools/verify_corpus.py` on ~965 records, no database:
 | Pair recall | 65.88% | 67.14% |
 | Categories reachable | 4/4 | 4/4 |
 
-### Accuracy — computed ad hoc, NOT yet in any tool
+### Accuracy — now a flag, not a throwaway script
 
-| Objective | Measure | Real | Synthetic |
+`python tools/verify_corpus.py <dir> --accuracy`, or `make chapter4` for the
+whole table including gates. Graded **per obligation**, on the internal (ERP)
+leg only: a split settlement's external legs each look exactly like a partial
+payment viewed alone, so grading them would score an ambiguity that is real
+rather than a classifier error.
+
+Classification accuracy, **bootstrap rules**, synthetic corpus, by size:
+
+| Archetype | 800 pairs | 1500 pairs | 5000 pairs |
 |---|---|---|---|
-| 2 — validation | accuracy (963/963) | 100.00% | 100.00% |
-| 1 — matching | F1 | 80.34% | 79.43% |
-| 3 — classification | accuracy vs. key | 100.00% ⚠️ | **81.25%** |
+| `MISSING_REFERENCE_CODE` | 90% | 79% | 66% |
+| `PARTIAL_PAYMENT` | 96% | 92% | 79% |
+| `SPLIT_SETTLEMENT` | 79% | 82% | 71% |
+| `TIMING_DIFFERENCE` | n/a | n/a | n/a |
+| **overall** | **90.00%** | **84.75%** | **72.45%** |
 
-**The real 100% is flattered by an easy sample** — it grades 60 obligations over
-only *three* categories, because all 36 `TIMING_DIFFERENCE` pairs got matched by
-the ML layer and never reached the queue. The synthetic 81.25% grades all four
-and is the honest number:
+`TIMING_DIFFERENCE` reads `n/a` because ~all of its pairs now **auto-match**
+and never reach the queue — that is the P1 fix working, not a gap. Force them
+into the queue with a high `--threshold` and they classify 144/144 correctly.
 
-| Category | In key | Reached queue | Correct |
-|---|---|---|---|
-| `MISSING_REFERENCE_CODE` | 24 | 24 | 96% |
-| `PARTIAL_PAYMENT` | 24 | 24 | 92% |
-| `SPLIT_SETTLEMENT` | 12 | 12 | **58%** |
-| `TIMING_DIFFERENCE` | 36 | 4 | **0%** |
+Read the size columns as a **property of the corpus, not only of the engine**.
+`tools/seed.py` draws descriptions from 15 counterparties × 5 narratives = 75
+combinations, so rows sharing byte-identical text grow linearly with corpus
+size (~11 per description at 800, ~140 at 5000). That crowding is what the
+counterparty blocking in `002783e` attacks, and it is why the 5000-pair column
+improved from 48.72% to 72.45% while the 800-pair column did not move at all.
+A real feed with more distinct narratives would sit nearer the left column.
 
-Two further qualifiers: these are the **cold-start bootstrap rules**, not the
-trained Random Forest (`verify_corpus.py` loads a nonexistent model path on
-purpose); the gate in `test_classifier.py` puts the forest at macro F1 1.00 vs
-bootstrap 0.89. And n=60/64 is thin for a headline claim.
+Still the **cold-start bootstrap rules**, not the trained Random Forest
+(`verify_corpus.py` loads a nonexistent model path on purpose); the gate in
+`test_classifier.py` puts the forest at macro F1 1.00 vs bootstrap 0.89.
+
+### The one failing gate
+
+`test_precision_meets_target`: 98.95%, gate 99%, **94 of 95 confirmed pairs
+correct**. Facts established rather than assumed:
+
+- **Pre-existing.** Reproduces identically at `e6f02a0`, before any of this
+  week's work — verified in a clean `git worktree`, not inferred.
+- **Deterministic, not flaky.** The corpus is seeded; three consecutive runs
+  give byte-identical output. (Earlier notes in this repo called it flaky.
+  That was wrong.)
+- **Platform-dependent.** It reportedly passed on the author's Windows
+  machine; it fails on Ubuntu 24.04 / Python 3.12.3, most likely a
+  scikit-learn tie-break difference in TF-IDF or DBSCAN.
+- **The gate demands perfection at this n.** With 95 confirmed pairs the only
+  achievable values are 100% (95/95) and 98.95% (94/95) — there is nothing in
+  between, so a "99%" gate is a 100% gate here.
+- **The offending pair is genuinely ambiguous**: two *different* obligations
+  from the same counterparty, identical descriptions (cosine 1.0), amounts
+  0.87% apart, 5 days apart, and the bank side carries no reference code.
+  Confidence 0.86 against a 0.85 threshold.
+
+A rule of "auto-confirm requires exact amount agreement **or** reference
+agreement" would reject it and take precision to 100%, but it would also stop
+auto-confirming the ~11 genuine partial payments currently matched, costing
+~6 points of recall. That is a **design decision about the engine, not a bug
+fix**, so it was left alone. Decide it deliberately before touching it.
 
 ---
 
 ## 8. What to build next — priority order
 
-### P0 — Run the system for real
+**P0–P5 from the previous handoff are done** (2026-08-10). What follows is
+what is left, renumbered.
 
-Nothing else is worth much until this happens, because every "it works" claim
-above is about in-process calls.
+### P0 — Look at the dashboard in a browser
 
-Either path:
+The only hop never exercised. The SPA is served by nginx at
+`http://169.58.153.9/`, the APIs behind it answer, auth and RBAC are verified
+by curl — but nobody has watched it render. Sign-in key:
+`grep SERVICE_API_KEY /opt/financehub/.env`. Expect the same class of bug the
+first real boot produced: things that unit-test clean and break on contact.
 
-- **Docker:** installer is at `~/Downloads/DockerDesktopInstaller.exe` (596 MB,
-  signature verified). Needs admin PowerShell: `wsl --update`, then the
-  installer, then **reboot**. WSL2 kernel is currently missing.
-- **VPS (user's stated preference):** `deploy/` is ready. Ubuntu 24.04,
-  2 vCPU / 4 GB. See [deploy/DEPLOY.md](deploy/DEPLOY.md). No Kafka needed —
-  `CONSUME_KAFKA=false` runs REST-only.
+While there, confirm the WebSocket carries a live event (open the dashboard,
+run a reconcile, watch the exception feed) — that is the other never-observed
+path.
 
-Then, in order: `up` → seed → confirm rows in Postgres → load the dashboard →
-sign in → switch to Auditor and confirm the API *refuses* the resolve. Expect
-bugs at every hop.
+### P1 — TLS, before anyone else is given the URL
 
-### P1 — Fix `TIMING_DIFFERENCE` classification (0%)
+`certbot --nginx` needs a domain and there isn't one pointed at the box yet.
+Until then the sign-in key and every JWT cross the network in clear text. See
+§8's old P6 note below, which still stands.
 
-Of 36 timing pairs, 32 were matched (fine) and the 4 that reached the queue were
-**all misclassified** — 3 as `MISSING_REFERENCE_CODE`, 1 as `PARTIAL_PAYMENT`.
-The pattern suggests the nominated counterpart was not the true leg, so features
-were computed against the wrong row. Start in
-`services/exception_handler/app/features.py` (`extract`, the `nearest` selection)
-and `classifier.py`'s bootstrap ordering.
+### P2 — Decide the precision gate deliberately
 
-### P2 — Fold accuracy grading into `verify_corpus.py`
+See §7. Pre-existing, deterministic, one genuinely ambiguous pair out of 95,
+and the "fix" is an engine design decision with a real recall cost. It should
+be *decided*, not left failing indefinitely — a permanently red gate trains
+everyone to ignore the suite.
 
-The §7 accuracy table was computed by a throwaway script. It should be a flag on
-the tool, graded on internal obligations (a split *leg* viewed alone is
-legitimately ambiguous with a partial payment — grade the obligation, not the leg).
+### P3 — Classification accuracy at scale
 
-### P3 — `SPLIT_SETTLEMENT` at 58%
+72.45% at 5000 pairs against 90.00% at 800. Much of the gap is corpus
+vocabulary (see §7), so the two honest options are different in kind:
 
-Reachable now, but a third still land as `PARTIAL_PAYMENT`. The co-settling
-arithmetic in the bootstrap rules needs tightening.
+- **Widen `tools/seed.py`'s pools** (15 counterparties × 5 narratives → far
+  more). This makes the corpus resemble a real feed rather than flattering the
+  engine, and is the cheaper change. It does not improve the engine.
+- **Keep pushing the engine.** The remaining `MISSING_REFERENCE_CODE` losses
+  are cases where the true leg is unfindable (mangled text, equal amount) and
+  2+ same-counterparty fractions get nominated instead, which the bootstrap
+  rule reads as multiplicity → split. Measured and ruled out already: coverage
+  does **not** separate the two (all four archetypes sit at median 0.83–1.00),
+  and a date-spread cut only separates by reading `seed.py`'s own
+  `randint(0, 4)` back off the generator, which is fitting the corpus rather
+  than the phenomenon. Do not redo those two experiments.
 
-### P4 — Larger samples
+### P4 — Train the forest on real feedback
 
-Rerun at `--count 5000` for numbers tight enough to defend.
+Everything above measures the **bootstrap rules**. The forest gates at macro
+F1 1.00 vs bootstrap 0.89, so the numbers in §7 are a floor, not a ceiling.
+Nothing has exercised the retrain loop end to end on the live box.
 
-### P5 — Chapter 4 harness
+### Deployment hardening — the standing note
 
-A script that runs every gate plus `verify_corpus` and emits one results table.
-The numbers currently only exist in scrolling pytest output.
+TLS via certbot (`provision.sh` deliberately does not configure it, since it
+cannot know the domain):
 
-### P6 — Deployment hardening
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d your.domain
+```
 
-TLS via certbot (`provision.sh` deliberately does not, since it cannot know the
-domain). Note `VITE_SERVICE_API_KEY` compiles into the public bundle — fine for a
-demo, documented as such, not a way to ship a credential.
+Note `VITE_SERVICE_API_KEY` compiles into the public bundle — fine for a demo,
+documented as such, not a way to ship a credential. A real deployment puts an
+identity provider in front of the gateway and drops `/auth/token` entirely.
 
 ---
 
 ## 9. Environment realities
 
-- **Dev machine:** Windows 11 Home, build 21996, 15.8 GB RAM. Virtualization
-  enabled in firmware. **Docker not installed. WSL2 kernel missing.**
-  `winget` is present but broken (`file cannot be accessed by the system`).
-- **Python:** 3.12.3 in `.venv` — the suite is verified on it, which is also what
-  Ubuntu 24.04 ships. Containers pin 3.11.
-- **`build (1).md` is untracked.** It is the spec and arguably should be
-  committed, but it has been left alone deliberately — do not commit it without
-  asking.
+- **The VPS is now the working machine.** Ubuntu 24.04.4 LTS,
+  `169.58.153.9`, 7.8 GB RAM, 96 GB disk, root. The repo is checked out
+  **twice**: `/root/Finance-hub` (where edits and commits happen) and
+  `/opt/financehub` (what systemd runs). They are separate clones — a change
+  is not live until you `git pull` in `/opt/financehub` **and** restart the
+  unit. There is no venv in `/root/Finance-hub`; use
+  `/opt/financehub/.venv/bin/python` for everything.
+- **Sourcing `.env` matters for tests.** `tests/test_integration_db.py` falls
+  back to a `financehub:changeme@localhost` default and skips when it cannot
+  connect. Run `set -a; source /opt/financehub/.env; set +a` first or its 18
+  tests silently vanish from the count.
+- **Push works over SSH**, via a deploy key generated on the box
+  (`~/.ssh/id_ed25519`, fingerprint
+  `SHA256:g2JeM0farZgSUxJDIuMFFE38avw/AY/4tdxU3J+Wc+Y`, registered on the
+  repo with write access as `financehub-vps`). The remote was switched from
+  HTTPS to `git@github.com:` — HTTPS has no credentials here.
+- **Dev machine (historical):** Windows 11 Home, 15.8 GB RAM. **Docker not
+  installed, WSL2 kernel missing**, `winget` broken. Relevant only because the
+  suite was last green there and is not here — see §7's precision gate note.
+- **Python:** 3.12.3, which is what Ubuntu 24.04 ships. Containers pin 3.11.
+- **`build.md` is untracked** (it appears as `build (1).md` on the Windows
+  machine). It is the spec and arguably should be committed, but it has been
+  left alone deliberately — do not commit it without asking.
 - **User preference:** VPS over Docker, stated explicitly. Don't re-litigate it.
 - **On datasets:** the user pushed hard on using real data. The settled position
   is in §6 — real obligations, derived counterpart side. Two *unrelated* public
@@ -311,16 +416,57 @@ demo, documented as such, not a way to ship a credential.
 - **The 62% clean archetype mix is deliberate.** A flat 1-in-6 spread puts two
   thirds of the corpus in the exception queue and shows a ~25% match rate, which
   measures the corpus rather than the engine.
+- **Applying `schema.sql` as `postgres` silently breaks re-runnability.** The
+  tables come out owned by `postgres`; `GRANT ALL` gives the app role DML but
+  not ownership, and DDL needs ownership — so the app's own `DATABASE_URL`
+  can never re-apply the schema. Presents as `InsufficientPrivilege: must be
+  owner of table transactions` from the integration tests, nowhere else.
+  Fixed in `260b35d`; `provision.sh` now applies it as the app role.
+- **A misclassification is usually a nomination bug, not a classifier bug.**
+  Every classification defect chased this session — `TIMING_DIFFERENCE` at 0%,
+  `SPLIT_SETTLEMENT` at 16% — turned out to be the matching engine failing to
+  nominate the true counterpart, with the bootstrap rules reasoning correctly
+  over the wrong input. Before touching `classifier.py`, print
+  `counterpart_count` and check whether the true leg is even in
+  `candidate_ids`.
+- **Two experiments already run and rejected — do not repeat them.**
+  (a) Anchoring `_co_settling_candidates`' relative floor on the best
+  *amount-plausible* candidate rather than the top pair: helps
+  `SPLIT_SETTLEMENT`, costs `MISSING_REFERENCE_CODE` far more (90% → 54%).
+  (b) Requiring a minimum coverage to claim multiplicity: coverage does not
+  separate the archetypes at all — all four sit at median 0.83–1.00.
+- **`--count` changes conclusions, not just confidence.** A fix verified at
+  800 pairs collapsed at 5000 because decoy density per description grows with
+  corpus size. Verify anything touching candidate generation at both sizes;
+  `make chapter4 n=5000` exists for this.
 
 ---
 
 ## 11. Before you claim you haven't broken anything
 
+One command now covers the gates and the corpus together:
+
 ```bash
-.venv/Scripts/python -m pytest            # 290 tests, must be green
-cd frontend && npm ci && npm run lint && npm run build
-python tools/seed.py --count 400 --out data/seed && python tools/verify_corpus.py data/seed
+set -a; source /opt/financehub/.env; set +a     # or the DB tests skip
+make chapter4                                    # gates + corpus + results table
 ```
 
-`verify_corpus.py` exits non-zero if an exception category becomes unreachable —
-that is the check that catches whole-system regressions no unit test sees.
+It exits non-zero if any gate fails or any exception category becomes
+unreachable — the check that catches whole-system regressions no unit test
+sees. Expect exactly one failure today (`test_precision_meets_target`, §7); a
+**second** failure is yours.
+
+The pieces separately, if you need them:
+
+```bash
+/opt/financehub/.venv/bin/python -m pytest       # 307 tests
+cd frontend && npm ci && npm run lint && npm run build
+/opt/financehub/.venv/bin/python tools/verify_corpus.py data/seed --accuracy
+```
+
+And after changing anything the services run, remember the second clone:
+
+```bash
+cd /opt/financehub && git pull --ff-only && systemctl restart 'financehub-*'
+systemctl --no-pager --plain is-active financehub-{validation,matching,exceptions,reporting}
+```
