@@ -157,6 +157,48 @@ def test_a_regressing_candidate_is_not_promoted(tmp_path):
     assert classifier.metadata["macro_f1"] == baseline
 
 
+def test_first_ever_model_is_measured_against_the_bootstrap_rules(tmp_path):
+    """Run one has no incumbent forest - but the rules are still serving.
+
+    The guard used to compare against `self.model`, which is None on the very
+    first retrain, so the first model was promoted unconditionally however bad
+    it was. That is the one case where nobody notices a regression, because
+    there is no "before" number to compare against. Sec. 14's gate is
+    "accuracy after retraining >= accuracy before", and for run one *before*
+    is the bootstrap rules.
+    """
+    good = build_corpus(per_category=150, hard_fraction=HARD_FRACTION, seed=21)
+    poisoned = _labelled(good)
+    rotated = [(features, poisoned[(i + 1) % len(poisoned)][1])
+               for i, (features, _) in enumerate(poisoned)]
+
+    fresh = ExceptionClassifier(path=tmp_path / "rf.pkl")
+    assert fresh.model is None, "this test is about the no-incumbent path"
+
+    outcome = fresh.train(rotated, promote_only_if_better=True)
+
+    assert outcome["promoted"] is False, (
+        "a first model trained on shuffled labels was promoted over the "
+        "bootstrap rules it displaces"
+    )
+    assert "bootstrap rules" in outcome["reason"]
+    assert outcome["incumbent"]["baseline"] == "bootstrap rules"
+    assert fresh.model is None, "nothing should have been installed"
+    assert not (tmp_path / "rf.pkl").exists(), "a rejected model must not persist"
+
+
+def test_a_good_first_model_still_promotes_over_the_rules(tmp_path):
+    """The new baseline must not block a genuinely better first model."""
+    good = build_corpus(per_category=150, hard_fraction=HARD_FRACTION, seed=22)
+
+    fresh = ExceptionClassifier(path=tmp_path / "rf.pkl")
+    outcome = fresh.train(_labelled(good), promote_only_if_better=True)
+
+    assert outcome["promoted"] is True
+    assert outcome["incumbent"]["baseline"] == "bootstrap rules"
+    assert outcome["macro_f1"] >= outcome["incumbent"]["macro_f1"]
+
+
 def test_promotion_guard_off_replaces_unconditionally(tmp_path):
     """Documents the difference: without the guard, build.md's behaviour is
     exactly what the guard exists to prevent."""

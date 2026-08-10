@@ -421,32 +421,64 @@ class ExceptionClassifier:
         candidate_accuracy = report.get("accuracy", 0.0)
         candidate_f1 = report.get("macro avg", {}).get("f1-score", 0.0)
 
-        # Score the incumbent on the SAME held-out rows before replacing it.
+        # Score whatever is currently serving on the SAME held-out rows before
+        # replacing it.
+        #
+        # On the first ever retrain there is no incumbent forest, but something
+        # *is* answering: the bootstrap rules. Comparing against `None` and
+        # promoting unconditionally - the previous behaviour - means the first
+        # model can be arbitrarily worse than the rules it displaces and still
+        # go live silently, which is the one case where nobody is watching for
+        # a regression because there is no "before" number to compare to.
+        # Sec. 14's gate is "accuracy after retraining >= accuracy before", and
+        # for run one, *before* is the bootstrap rules.
         incumbent = None
-        if promote_only_if_better and self.model is not None:
-            incumbent_report = classification_report(
-                y_test, self.model.predict(X_test), output_dict=True, zero_division=0
-            )
-            incumbent = {
-                "accuracy": incumbent_report.get("accuracy", 0.0),
-                "macro_f1": incumbent_report.get("macro avg", {}).get("f1-score", 0.0),
-            }
-
-            if candidate_f1 < incumbent["macro_f1"] - tolerance:
-                logger.warning(
-                    "Rejecting retrain: candidate macro F1 %.3f is worse than the "
-                    "incumbent's %.3f. The existing model is kept.",
-                    candidate_f1, incumbent["macro_f1"],
+        baseline_name = "incumbent"
+        if promote_only_if_better:
+            if self.model is not None:
+                incumbent_report = classification_report(
+                    y_test, self.model.predict(X_test), output_dict=True, zero_division=0
                 )
-                return {
-                    "promoted": False,
-                    "reason": "candidate regressed against the incumbent",
-                    "candidate": {"accuracy": candidate_accuracy, "macro_f1": candidate_f1},
-                    "incumbent": incumbent,
-                    "tolerance": tolerance,
-                    "n_samples": len(samples),
-                    "report": report,
+            elif self.bootstrap is not None:
+                baseline_name = "bootstrap rules"
+                # Category is fully determined by the feature vector: the
+                # bootstrap rules only consult `context` for a confidence and
+                # a rationale, never to choose the class, so rebuilding the
+                # rows from FEATURE_NAMES scores it faithfully here.
+                baseline_pred = [
+                    self.bootstrap.classify(
+                        ExceptionFeatures(**dict(zip(FEATURE_NAMES, row)))
+                    ).category
+                    for row in X_test.tolist()
+                ]
+                incumbent_report = classification_report(
+                    y_test, np.array(baseline_pred), output_dict=True, zero_division=0
+                )
+            else:
+                incumbent_report = None
+
+            if incumbent_report is not None:
+                incumbent = {
+                    "accuracy": incumbent_report.get("accuracy", 0.0),
+                    "macro_f1": incumbent_report.get("macro avg", {}).get("f1-score", 0.0),
+                    "baseline": baseline_name,
                 }
+
+                if candidate_f1 < incumbent["macro_f1"] - tolerance:
+                    logger.warning(
+                        "Rejecting retrain: candidate macro F1 %.3f is worse than "
+                        "the %s' %.3f. What is currently serving is kept.",
+                        candidate_f1, baseline_name, incumbent["macro_f1"],
+                    )
+                    return {
+                        "promoted": False,
+                        "reason": f"candidate regressed against the {baseline_name}",
+                        "candidate": {"accuracy": candidate_accuracy, "macro_f1": candidate_f1},
+                        "incumbent": incumbent,
+                        "tolerance": tolerance,
+                        "n_samples": len(samples),
+                        "report": report,
+                    }
 
         self.model = model
         self.metadata = {
