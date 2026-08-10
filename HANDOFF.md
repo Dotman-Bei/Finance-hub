@@ -8,10 +8,11 @@ Last updated 2026-08-10. Branch `main`, pushed to
 `github.com/Dotman-Bei/Finance-hub`.
 
 **What changed this session:** the system was deployed and run for real on a
-VPS for the first time, then driven in a real browser — §3 is substantially
-rewritten as a result. Five bugs found and fixed, all of them invisible to the
-test suite because they only exist once the thing runs as services against a
-real database. `TIMING_DIFFERENCE` went 0% → 100%, `SPLIT_SETTLEMENT` 16% →
+VPS for the first time, driven in a real browser, and put behind TLS — §3 is
+substantially rewritten as a result. It is live at
+**https://financehub-demo.duckdns.org**. Six bugs found and fixed, all of them
+invisible to the test suite because they only exist once the thing runs as
+services against a real database. `TIMING_DIFFERENCE` went 0% → 100%, `SPLIT_SETTLEMENT` 16% →
 71% at 5000-pair scale, accuracy grading became `verify_corpus.py --accuracy`,
 and `make chapter4` now emits the whole results table in one command.
 
@@ -99,6 +100,10 @@ substantially on 2026-08-10: the system has now been run for real.**
   exception queue, a live `exception.created` burst arriving over the
   WebSocket during a reconcile, and the Auditor role being offered no Resolve
   control. This found three real bugs on first contact (`25906e1`, `a3dd1d7`).
+- **TLS is live** at **https://financehub-demo.duckdns.org** — Let's Encrypt,
+  auto-renewing (`certbot.timer`, dry-run passes), HTTP 301s to HTTPS. The
+  same 16/16 browser run passes over HTTPS with the WebSocket negotiated as
+  `wss://`.
 
 ### Still NOT verified
 
@@ -106,7 +111,6 @@ substantially on 2026-08-10: the system has now been run for real.**
 |---|---|
 | `docker compose up` | **Never run.** Docker is not installed anywhere in play |
 | Kafka ingestion | Never run against a live broker (`CONSUME_KAFKA=false` by design here) |
-| TLS | Not configured — the sign-in key and every JWT cross the network in clear text |
 | The trained Random Forest in production | Every reported number is the cold-start bootstrap engine; nothing has trained the forest on the live box |
 
 The old warning that "the assembled system has never actually run as
@@ -300,20 +304,14 @@ fix**, so it was left alone. Decide it deliberately before touching it.
 **P0–P5 from the previous handoff are done** (2026-08-10). What follows is
 what is left, renumbered.
 
-### P0 — TLS, before anyone else is given the URL
-
-`certbot --nginx` needs a domain and there isn't one pointed at the box yet.
-Until then the sign-in key and every JWT cross the network in clear text. See
-§8's old P6 note below, which still stands.
-
-### P1 — Decide the precision gate deliberately
+### P0 — Decide the precision gate deliberately
 
 See §7. Pre-existing, deterministic, one genuinely ambiguous pair out of 95,
 and the "fix" is an engine design decision with a real recall cost. It should
 be *decided*, not left failing indefinitely — a permanently red gate trains
 everyone to ignore the suite.
 
-### P2 — Classification accuracy at scale
+### P1 — Classification accuracy at scale
 
 72.45% at 5000 pairs against 90.00% at 800. Much of the gap is corpus
 vocabulary (see §7), so the two honest options are different in kind:
@@ -330,7 +328,7 @@ vocabulary (see §7), so the two honest options are different in kind:
   `randint(0, 4)` back off the generator, which is fitting the corpus rather
   than the phenomenon. Do not redo those two experiments.
 
-### P3 — Train the forest on real feedback
+### P2 — Train the forest on real feedback
 
 Everything above measures the **bootstrap rules**. The forest gates at macro
 F1 1.00 vs bootstrap 0.89, so the numbers in §7 are a floor, not a ceiling.
@@ -338,13 +336,22 @@ Nothing has exercised the retrain loop end to end on the live box.
 
 ### Deployment hardening — the standing note
 
-TLS via certbot (`provision.sh` deliberately does not configure it, since it
-cannot know the domain):
+TLS is configured on this box (see §3). Two things about it that will bite:
 
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d your.domain
-```
+* **`provision.sh` will not overwrite a certbot-managed nginx site**, by
+  design — it detects the "managed by Certbot" markers and skips the copy, so
+  a deploy cannot silently revert the site to plain HTTP. The cost is that
+  changes to `deploy/nginx/financehub.conf` are **not** picked up on a TLS
+  host; apply them by hand, then `certbot install --cert-name <domain> --nginx`.
+* **certbot needs a concrete `server_name`.** The template ships `_` so a
+  nameless box still serves, and `certbot --nginx` cannot find a server block
+  to install into against a catch-all — it issues the certificate and then
+  fails to deploy it. Pass `SERVER_NAME=your.domain` to provision.sh, or set
+  it before running certbot.
+
+**HSTS is deliberately not set.** Adding it is a one-line `add_header`, but it
+is sticky in browsers for its `max-age` and painful to undo if the domain is
+ever served over plain HTTP again — worth a deliberate decision, not a default.
 
 Note `VITE_SERVICE_API_KEY` compiles into the public bundle — fine for a demo,
 documented as such, not a way to ship a credential. A real deployment puts an
