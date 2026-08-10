@@ -282,3 +282,32 @@ def test_evaluate_scores_on_the_supplied_set(tmp_path):
     score = classifier.evaluate(_labelled(corpus))
     assert 0.0 <= score["macro_f1"] <= 1.0
     assert score["n"] == len(corpus)
+
+
+def test_scheduled_triage_and_the_endpoint_run_the_same_pass():
+    """Beat must not run a second, drifting copy of the triage logic.
+
+    The queue used to be swept only by a human POSTing /triage - beat
+    scheduled retraining and nothing else - so a deployed box accumulated
+    exceptions that carried no category and no suggested resolution, which the
+    dashboard shows as "Untriaged" and a reviewer cannot action. The fix
+    schedules it; this pins that the scheduled task delegates to the same
+    `triage_batch` the endpoint does rather than reimplementing it.
+    """
+    import inspect
+
+    from services.exception_handler.app import main, retrain, triage
+
+    assert "financehub.triage.triage_open" in retrain.celery.conf.beat_schedule[
+        "triage-open-exceptions"
+    ]["task"]
+
+    # Both call sites reach the one implementation.
+    assert "triage_batch" in inspect.getsource(retrain.triage_open)
+    assert "triage_batch" in inspect.getsource(main.triage)
+    assert retrain.triage_batch is triage.triage_batch
+    assert main.triage_batch is triage.triage_batch
+
+    # Sweeping far more often than retraining is the point: triage is cheap
+    # and an untriaged row is invisible work.
+    assert retrain.TRIAGE_INTERVAL_SECONDS <= 300

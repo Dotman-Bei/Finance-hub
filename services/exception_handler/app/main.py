@@ -46,6 +46,7 @@ from .feedback import (
     training_samples,
 )
 from .resolution import suggest
+from .triage import triage_batch
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -123,65 +124,12 @@ async def triage(
 ) -> dict[str, Any]:
     """Classify OPEN exceptions and write their suggested resolutions.
 
-    Moves each row to `state='SUGGESTED'` with the pathway from Sec. 10's table.
+    The work lives in `triage.triage_batch` so the Celery beat schedule runs
+    the same pass rather than a second copy of it. Handed to a threadpool
+    because it is CPU-bound and blocking - `async def` alone would pin the
+    event loop for the whole batch.
     """
-    # The Celery worker retrains in a separate process, so the file on disk can
-    # be newer than what this process holds. Checked per batch (Sec. 11's
-    # "hot-swapped on next classify()").
-    if classifier.reload_if_changed():
-        logger.info("Picked up a retrained classifier before triage")
-
-    pending = await run_in_threadpool(load_untriaged, session, limit)
-    if not pending:
-        return {"triaged": 0, "by_category": {}, "engine": None}
-
-    by_category: dict[str, int] = {}
-    triaged: list[dict[str, Any]] = []
-    engine_used = None
-
-    for row in pending:
-        features = extract(
-            row["transaction"], row["counterparts"], row["matching_context"]
-        )
-        result = classifier.classify(features)
-        engine_used = result.engine
-
-        payload = suggest(
-            result.category,
-            features,
-            confidence=result.confidence,
-            engine=result.engine,
-            rationale=result.rationale,
-        )
-        apply_suggestion(
-            session, row["exception_id"], result.category,
-            result.confidence, payload, features,
-        )
-        by_category[result.category] = by_category.get(result.category, 0) + 1
-        triaged.append(
-            {
-                "id": str(row["exception_id"]),
-                "category": result.category,
-                "classifier_confidence": round(result.confidence, 4),
-                "state": "SUGGESTED",
-                "suggested_resolution": payload,
-                "transaction": {
-                    **row["transaction"],
-                    "id": str(row["transaction"]["id"]),
-                    "txn_date": str(row["transaction"]["txn_date"]),
-                },
-            }
-        )
-
-    session.commit()
-
-    # Published after the commit so the dashboard never sees a suggestion that
-    # a rollback then discarded.
-    for item in triaged:
-        publisher.publish(EventType.EXCEPTION_SUGGESTED, item)
-    logger.info("Triaged %d exceptions via %s: %s", len(pending), engine_used, by_category)
-
-    return {"triaged": len(pending), "by_category": by_category, "engine": engine_used}
+    return await run_in_threadpool(triage_batch, session, classifier, limit)
 
 
 @app.get("/exceptions")

@@ -48,10 +48,20 @@ from shared.db import session_scope
 
 from .classifier import MODEL_PATH, ExceptionClassifier
 from .feedback import resolved_count, training_samples
+from .triage import triage_batch
 
 logger = logging.getLogger(__name__)
 
 celery = Celery("financehub.retrain", broker=settings.celery_broker_url)
+
+#: How often the open queue is swept. Short, because an untriaged exception is
+#: invisible work: it carries no category and no suggested resolution, so it
+#: cannot be actioned by a reviewer or counted by a category chart.
+TRIAGE_INTERVAL_SECONDS = 120.0
+
+#: Rows per sweep. Bounded so one very large reconciliation cannot occupy the
+#: worker for minutes; the next sweep two minutes later takes the remainder.
+TRIAGE_BATCH_LIMIT = 500
 
 celery.conf.update(
     result_backend=settings.celery_broker_url,
@@ -72,7 +82,18 @@ celery.conf.update(
             # a classifier that changes under reviewers mid-session makes the
             # queue behave inconsistently within one sitting.
             "schedule": crontab(minute=0),
-        }
+        },
+        "triage-open-exceptions": {
+            "task": "financehub.triage.triage_open",
+            # Every two minutes, unlike the retrain. Triage is cheap - a
+            # feature extraction and a predict per row - and until it runs an
+            # exception has no category, so the dashboard shows it as
+            # "Untriaged" and no suggested resolution exists for a reviewer to
+            # act on. Nothing else called it: beat scheduled retraining alone,
+            # so a deployed box accumulated uncategorised exceptions until
+            # somebody POSTed /triage by hand.
+            "schedule": TRIAGE_INTERVAL_SECONDS,
+        },
     },
 )
 
@@ -193,6 +214,29 @@ def training_readiness() -> dict[str, Any]:
         "ready": usable >= trigger,
         "provenance": provenance,
     }
+
+
+@celery.task(name="financehub.triage.triage_open", bind=True)
+def triage_open(self, limit: int = TRIAGE_BATCH_LIMIT) -> dict[str, Any]:
+    """Classify whatever is sitting OPEN in the exception queue.
+
+    Runs the same `triage_batch` the REST endpoint runs, so scheduling this
+    cannot drift from what a manual POST /triage does.
+
+    Its own classifier instance, not the API's: this is a separate process, so
+    it loads the current model from disk and `triage_batch` calls
+    `reload_if_changed` before each pass anyway.
+    """
+    classifier = ExceptionClassifier(path=MODEL_PATH)
+    with session_scope() as session:
+        outcome = triage_batch(session, classifier, limit)
+
+    if outcome["triaged"]:
+        logger.info(
+            "Scheduled triage classified %d exceptions via %s: %s",
+            outcome["triaged"], outcome["engine"], outcome["by_category"],
+        )
+    return outcome
 
 
 __all__ = ["celery", "retrain_if_ready", "training_readiness", "MIN_SAMPLES"]
