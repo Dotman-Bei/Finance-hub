@@ -1,6 +1,6 @@
 # FinanceHub shortcut targets (build.md Sec. 4).
 .DEFAULT_GOAL := help
-.PHONY: help env infra down schema migrate revision test clean ps logs seed seed-kafka seed-http seed-real verify
+.PHONY: help env infra down schema migrate revision test clean ps logs seed seed-kafka seed-http seed-real verify chapter4
 
 PY := .venv/bin/python
 ifeq ($(OS),Windows_NT)
@@ -8,7 +8,7 @@ ifeq ($(OS),Windows_NT)
 endif
 
 help:  ## Show this help
-	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[1m%-10s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[1m%-10s\033[0m %s\n", $$1, $$2}'
 
 env:  ## Create the venv and install the shared foundation
 	python -m venv .venv
@@ -54,6 +54,9 @@ seed-real:  ## Seed from a real corpus: make seed-real d=online_retail_II.zip n=
 
 verify:  ## Grade data/seed against its answer key through the real pipelines
 	$(PY) tools/verify_corpus.py data/seed
+
+chapter4:  ## Run every gate + corpus grading and emit one results table: make chapter4 n=5000
+	$(PY) tools/chapter4.py --count $(or $(n),2000)
 
 down:  ## Stop everything (keeps volumes)
 	docker compose down
