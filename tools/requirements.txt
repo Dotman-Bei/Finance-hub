@@ -1,0 +1,12 @@
+# Extra dependencies for tools/, not for any service.
+#
+# Kept out of the service requirements on purpose: nothing that runs in
+# production reads a spreadsheet, and a dependency installed into all six
+# processes to support a one-off corpus loader is a dependency to explain later.
+#
+#   pip install -r tools/requirements.txt
+
+# real_ledger.py reads the UCI Online Retail II workbook, which ships as xlsx.
+# Needed only for `seed.py --from-dataset`; the invoice-level extract is cached
+# as CSV after the first parse, so this is a one-time requirement per machine.
+openpyxl==3.1.5

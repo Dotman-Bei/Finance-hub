@@ -258,8 +258,73 @@ The tool writes to files or Kafka, **never to Postgres** — nothing may reach
 the database without passing validation first, and a seeder that INSERTed
 directly would fabricate the guarantee the system exists to provide.
 
-Measured on 965 records through the real pipelines: 60/60 malformed
-quarantined, 0 valid records lost, 62% match rate.
+### Real obligations
+
+The *pairing* must always be derived — no institution publishes both its
+ledger and its bank feed, so no public dataset contains two views of the same
+payments, and without an answer key precision cannot be computed at all. The
+**obligations need not be**:
+
+```bash
+curl -L -o online_retail_II.zip \
+  https://archive.ics.uci.edu/static/public/502/online+retail+ii.zip
+pip install -r tools/requirements.txt
+python tools/seed.py --count 2000 --from-dataset online_retail_II.zip --out data/seed
+```
+
+[tools/real_ledger.py](tools/real_ledger.py) draws the internal side from UCI
+**Online Retail II** — 1.07M line items from a UK retailer, Dec 2009–Dec 2011,
+no account needed. It fits because it has the one thing fraud corpora lack:
+**real invoice numbers**. Aggregating line items per invoice yields genuine
+per-invoice obligations, which is what an ERP ledger holds.
+
+Amounts, dates, invoice references, counterparties and product descriptions
+are then all real; only the counterpart leg is constructed. Two transformations
+are applied and both are deliberate:
+
+- **Dates are shifted forward.** The KPI endpoint defaults to a 30-day window,
+  so the original 2009–2011 timeline would show zeroes on every panel. Every
+  date moves by the same offset, so intervals, day-of-week structure and
+  seasonality survive exactly.
+- **References are prefixed.** The pipeline enforces `^REF-[0-9]{4,10}$`;
+  invoice `489434` becomes `REF-489434`. The identifier is unchanged and still
+  real — the prefix maps it into the format this system's feed spec requires,
+  which is what an ETL adapter is for. Relaxing the regex instead would weaken
+  a documented rule and perturb the detection-rate gate.
+
+75.5% of raw line items are retained. Cancellations (invoices prefixed `C`,
+negative amounts) are excluded because the system is *designed* to reject them
+and they would otherwise inflate the quarantine rate with items that were never
+transactions; rows without a customer are dropped because the counterparty is
+what the clustering reads.
+
+### Grading a corpus
+
+[tools/verify_corpus.py](tools/verify_corpus.py) runs a corpus back through
+the real validation, matching and triage code and grades it against its own
+answer key. It exits non-zero if any exception category proves unreachable —
+which is how the `SPLIT_SETTLEMENT` gap above was found.
+
+```bash
+python tools/verify_corpus.py data/seed
+```
+
+Measured on ~965 records, both corpora, no database:
+
+| | Synthetic | Real (Online Retail II) |
+|---|---|---|
+| Detection rate | 100.00% | 100.00% |
+| False positive rate | 0.00% | 0.00% |
+| Match rate | 61.88% | **62.90%** |
+| Pair precision | 100.00% | 100.00% |
+| Pair recall | 65.88% | 67.14% |
+| Categories reachable | 4 of 4 | 4 of 4 |
+
+Real obligations perform marginally better, mostly because genuine product
+descriptions are more distinctive than generated ones, so the ML layer clears
+a few more pairs. `TIMING_DIFFERENCE` is rarer on the real corpus (1 vs 11) for
+the same reason — distinctive text lets the matcher settle timing cases that
+would otherwise reach the queue.
 
 ## Running the whole system
 

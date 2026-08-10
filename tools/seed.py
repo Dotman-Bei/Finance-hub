@@ -5,19 +5,26 @@ system but never says what flows through it: every corpus in the repo lives
 under a `tests/` directory and is consumed by a gate, so a freshly started
 stack comes up healthy with an empty database and nothing to show.
 
-Why generated rather than a public dataset
-------------------------------------------
-Reconciliation needs *two sides that partially disagree* - an internal ledger
-and an external statement covering the same payments. Public financial
-datasets are one-sided transaction logs labelled for fraud; you cannot
-reconcile a list against itself, and `PARTIAL_PAYMENT` / `SPLIT_SETTLEMENT` /
-`MISSING_REFERENCE_CODE` / `TIMING_DIFFERENCE` appear in none of them. Real
-two-sided data is bank-confidential. build.md Sec. 14 sanctions synthetic
-corpora for exactly this reason.
+Why the counterpart side is derived
+-----------------------------------
+Reconciliation needs *two views of the same events* - an internal ledger and
+an external statement covering the same payments - not merely two lists. Two
+unrelated public datasets record different events entirely, so no true pair
+exists between them: every match would be coincidence, and with no answer key
+precision could not be computed at all. Real paired data is bank-confidential,
+because it requires one organisation publishing both its books and its bank
+feed. build.md Sec. 14 sanctions synthetic corpora for exactly this reason.
 
-Generating also buys the thing real data cannot: a **known answer**. Precision
-is only measurable against ground truth, and nobody has labelled which rows of
-a real bank statement truly reconcile.
+So the *pairing* is always derived. The **obligations need not be**:
+`--from-dataset` draws them from a real corpus via tools/real_ledger.py, which
+gives real amounts, dates, invoice references, counterparties and product
+descriptions, with only the counterpart leg constructed. That is the stronger
+claim for a write-up, and it costs nothing here - the archetypes are
+transformations applied *to* obligations, and where an obligation came from
+does not change them.
+
+Deriving also preserves the thing real data cannot supply: a **known answer**.
+Nobody has labelled which rows of a real bank statement truly reconcile.
 
 What this emits, and why it is not the test corpora
 ---------------------------------------------------
@@ -69,6 +76,7 @@ import argparse
 import csv
 import datetime as dt
 import io
+import itertools
 import json
 import logging
 import random
@@ -178,15 +186,22 @@ class Corpus:
         return len(self.erp_rows) + len(self.bank_rows)
 
 
-def _mangle(narrative: str, counterparty: str, rng: random.Random) -> str:
-    """Bank-style narrative noise: truncation, casing, reference fragments."""
-    short = counterparty.upper()[: rng.randint(8, len(counterparty))]
+def _mangle(description: str, rng: random.Random) -> str:
+    """Bank-style narrative noise: truncation, casing, reference fragments.
+
+    Takes the whole description rather than its parts, so a real ledger entry
+    mangles exactly like a generated one. Truncation is what makes this bite:
+    a bank statement narrative is a fixed-width field, and the resulting loss
+    of the tail is the reason the ML layer exists at all.
+    """
+    head = description.split(" - ")[0].strip() or description.strip()
+    short = head.upper()[: rng.randint(8, max(9, len(head)))]
     return rng.choice(
         [
-            f"{short}//REF{rng.randint(1000, 9999)} {narrative.upper()}",
-            f"{narrative.upper()} {short} {rng.randint(100000, 999999)}",
-            f"POS {short}  {narrative}",
-            f"{short} - {narrative} - BATCH{rng.randint(10, 99)}",
+            f"{short}//REF{rng.randint(1000, 9999)}",
+            f"{short} {rng.randint(100000, 999999)}",
+            f"POS {short}",
+            f"{short} - BATCH{rng.randint(10, 99)}",
         ]
     )
 
@@ -216,10 +231,10 @@ def _archetype_plan(pair_count: int, rng: random.Random) -> list[str]:
     return plan
 
 
-def _erp_row(rng: random.Random, **over: Any) -> dict[str, Any]:
+def _erp_row(seq: int, rng: random.Random, **over: Any) -> dict[str, Any]:
     """Internal ledger, in the ERP vendor's column vocabulary."""
     row = {
-        "transaction_id": f"ERP-{rng.randint(100000, 999999)}",
+        "transaction_id": f"ERP-{seq:06d}",
         "source": "erp",
         "transaction_amount": None,
         "ccy": "USD",
@@ -231,15 +246,21 @@ def _erp_row(rng: random.Random, **over: Any) -> dict[str, Any]:
     return row
 
 
-def _bank_row(rng: random.Random, **over: Any) -> dict[str, Any]:
+def _bank_row(seq: int, rng: random.Random, **over: Any) -> dict[str, Any]:
     """External feed, in the bank's column vocabulary - deliberately different.
 
     Different aliases on each side is what makes normalisation load-bearing
     rather than decorative; a seeder that emitted canonical names on both
     sides would leave COLUMN_ALIASES untested by everything it feeds.
+
+    Identifiers are sequential, not random. Drawing 500+ ids from randint's
+    900k range collides with probability around 14%, and a duplicated
+    external_id makes the answer key ambiguous and gives two transactions one
+    identity - which reads downstream as a data-quality fault in the feed
+    rather than a defect in the generator.
     """
     row = {
-        "txn_id": f"BNK-{rng.randint(100000, 999999)}",
+        "txn_id": f"BNK-{seq:06d}",
         "channel": rng.choice(EXTERNAL_SOURCES),
         "amt": None,
         "currency_code": "USD",
@@ -285,32 +306,78 @@ def build_corpus(
     malformed_count: int = 60,
     signed_fraction: float = 0.35,
     seed: int = 20260809,
+    ledger: list[dict[str, Any]] | None = None,
 ) -> Corpus:
-    """Generate both feeds with an even spread of archetypes."""
+    """Generate both feeds with a realistic spread of archetypes.
+
+    `ledger` supplies the internal side from outside - see tools/real_ledger.py,
+    which draws it from a real transaction corpus. When given, amounts, dates,
+    references and descriptions all come from observed data and only the
+    external counterpart is derived. When omitted, both sides are generated.
+
+    The archetypes, the decoys and the malformed records behave identically
+    either way: they are transformations applied *to* obligations, and where
+    the obligation came from does not change them.
+    """
     rng = random.Random(seed)
     today = dt.date.today()
     corpus = Corpus()
 
-    for archetype in _archetype_plan(pair_count, rng):
-        counterparty = rng.choice(COUNTERPARTIES)
-        narrative = rng.choice(NARRATIVES)
-        amount = round(rng.uniform(120.0, 180000.0), 2)
-        txn_date = today - dt.timedelta(
-            days=rng.randint(MAX_FORWARD_SHIFT[archetype] + 1, 120)
-        )
-        reference = f"REF-{rng.randint(10000, 99999)}"
-        description = f"{counterparty} - {narrative}"
+    # Sequential, not random: see _bank_row. Started at a seed-derived offset so
+    # two corpora built with different seeds do not share identifiers either.
+    erp_seq = itertools.count(rng.randint(100000, 400000))
+    bank_seq = itertools.count(rng.randint(500000, 800000))
+
+    if ledger is not None:
+        if len(ledger) < pair_count:
+            pair_count = len(ledger)
+        ledger = list(ledger[:pair_count])
+
+    for index, archetype in enumerate(_archetype_plan(pair_count, rng)):
+        if ledger is not None:
+            obligation = ledger[index]
+            amount = round(float(obligation["amount"]), 2)
+            txn_date = obligation["txn_date"]
+            reference = obligation["reference_code"]
+            description = obligation["description"]
+            erp_id = obligation["external_id"]
+            currency = obligation.get("currency", "USD")
+        else:
+            counterparty = rng.choice(COUNTERPARTIES)
+            narrative = rng.choice(NARRATIVES)
+            amount = round(rng.uniform(120.0, 180000.0), 2)
+            txn_date = today - dt.timedelta(
+                days=rng.randint(MAX_FORWARD_SHIFT[archetype] + 1, 120)
+            )
+            reference = f"REF-{rng.randint(10000, 99999)}"
+            description = f"{counterparty} - {narrative}"
+            erp_id = None
+            currency = "USD"
+
+        # A real invoice dated inside the settlement window would be pushed
+        # into the future by its own archetype, where stage 2 correctly
+        # quarantines it. real_ledger reserves headroom to prevent this; the
+        # guard is here because a caller supplying its own ledger cannot be
+        # assumed to have done so.
+        latest_safe = today - dt.timedelta(days=MAX_FORWARD_SHIFT[archetype])
+        if txn_date > latest_safe:
+            txn_date = latest_safe
 
         erp = _erp_row(
+            next(erp_seq),
             rng,
             transaction_amount=amount,
+            ccy=currency,
             value_date=txn_date.isoformat(),
             narrative=description,
             ref=reference,
         )
+        if erp_id:
+            erp["transaction_id"] = erp_id
 
         bank_defaults = {
             "amt": amount,
+            "currency_code": currency,
             "posted_date": txn_date.isoformat(),
             "memo": description,
             "reference": reference,
@@ -319,20 +386,21 @@ def build_corpus(
         legs: list[dict[str, Any]] = []
 
         if archetype == "exact":
-            legs.append(_bank_row(rng, **bank_defaults))
+            legs.append(_bank_row(next(bank_seq), rng, **bank_defaults))
 
         elif archetype == "timing_difference":
             settled = txn_date + dt.timedelta(days=rng.randint(5, 20))
-            legs.append(_bank_row(rng, **{**bank_defaults, "posted_date": settled.isoformat()}))
+            legs.append(_bank_row(next(bank_seq), rng, **{**bank_defaults, "posted_date": settled.isoformat()}))
 
         elif archetype == "missing_reference":
             legs.append(
                 _bank_row(
+                    next(bank_seq),
                     rng,
                     **{
                         **bank_defaults,
                         "reference": None,
-                        "memo": _mangle(narrative, counterparty, rng),
+                        "memo": _mangle(description, rng),
                     },
                 )
             )
@@ -340,6 +408,7 @@ def build_corpus(
         elif archetype == "partial_payment":
             legs.append(
                 _bank_row(
+                    next(bank_seq),
                     rng,
                     **{
                         **bank_defaults,
@@ -362,6 +431,7 @@ def build_corpus(
             for n, weight in enumerate(weights):
                 legs.append(
                     _bank_row(
+                        next(bank_seq),
                         rng,
                         **{
                             **bank_defaults,
@@ -378,10 +448,11 @@ def build_corpus(
         elif archetype == "noisy_description":
             legs.append(
                 _bank_row(
+                    next(bank_seq),
                     rng,
                     **{
                         **bank_defaults,
-                        "memo": _mangle(narrative, counterparty, rng),
+                        "memo": _mangle(description, rng),
                         "reference": None,
                         "posted_date": (txn_date + dt.timedelta(days=rng.randint(0, 2))).isoformat(),
                     },
@@ -415,6 +486,7 @@ def build_corpus(
 
         if i % 2 == 0:
             row = _erp_row(
+                next(erp_seq),
                 rng,
                 transaction_amount=amount,
                 value_date=txn_date.isoformat(),
@@ -425,6 +497,7 @@ def build_corpus(
             corpus.decoys.append(row["transaction_id"])
         else:
             row = _bank_row(
+                next(bank_seq),
                 rng,
                 amt=amount,
                 posted_date=txn_date.isoformat(),
@@ -439,6 +512,7 @@ def build_corpus(
         counterparty = rng.choice(COUNTERPARTIES)
         description = f"{counterparty} - {rng.choice(NARRATIVES)}"
         row = _bank_row(
+            next(bank_seq),
             rng,
             amt=round(rng.uniform(120.0, 180000.0), 2),
             posted_date=(today - dt.timedelta(days=rng.randint(1, 120))).isoformat(),
@@ -469,6 +543,18 @@ def build_corpus(
 
     rng.shuffle(corpus.bank_rows)
     rng.shuffle(corpus.erp_rows)
+
+    # The answer key is keyed on external_id, so a duplicate makes it ambiguous
+    # and hands two transactions one identity. Cheap to check, and the failure
+    # it guards against is silent: it surfaces downstream as an inexplicable
+    # mismatch between the key and what the pipeline reports.
+    ids = [r["transaction_id"] for r in corpus.erp_rows] + [
+        r["txn_id"] for r in corpus.bank_rows
+    ]
+    if len(ids) != len(set(ids)):
+        duplicates = {i for i in ids if ids.count(i) > 1}
+        raise AssertionError(f"duplicate external_id(s) generated: {sorted(duplicates)[:5]}")
+
     return corpus
 
 
@@ -647,6 +733,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="fraction of bank records carrying a real sha256 checksum")
     parser.add_argument("--seed", type=int, default=20260809,
                         help="RNG seed; the same seed always yields the same corpus")
+    parser.add_argument("--from-dataset", default=None, metavar="PATH",
+                        help="draw obligations from a real corpus (the UCI Online Retail II "
+                             "zip/xlsx, or the directory holding it) instead of generating them")
+    parser.add_argument("--dataset-days", type=int, default=120,
+                        help="how much of the source timeline to draw from, in days (--from-dataset)")
     parser.add_argument("--sink", choices=("files", "kafka", "http"), default="files",
                         help="where to write; never Postgres, which must be reached through validation")
     parser.add_argument("--out", default="data/seed",
@@ -664,12 +755,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.count < len(ARCHETYPES):
         parser.error(f"--count must be at least {len(ARCHETYPES)} to cover every archetype")
 
+    ledger = None
+    if args.from_dataset:
+        from real_ledger import load_invoices, to_ledger
+
+        invoices = load_invoices(args.from_dataset)
+        ledger = to_ledger(
+            invoices,
+            count=args.count,
+            window_days=args.dataset_days,
+            seed=args.seed,
+        )
+        print(
+            f"Real ledger: {len(ledger)} invoices from {args.from_dataset} "
+            f"(last {args.dataset_days} days of the source timeline, shifted to the present)"
+        )
+
     corpus = build_corpus(
         pair_count=args.count,
         decoy_count=args.decoys,
         malformed_count=args.malformed,
         signed_fraction=args.signed_fraction,
         seed=args.seed,
+        ledger=ledger,
     )
 
     print(
