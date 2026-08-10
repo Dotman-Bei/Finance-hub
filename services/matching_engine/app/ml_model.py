@@ -82,6 +82,16 @@ DEFAULT_DATE_TOLERANCE_DAYS = 20
 #: downstream co-settling logic is willing to keep serves nothing.
 DEFAULT_MAX_CANDIDATES_PER_ROW = 6
 
+#: A partial payment or split leg settles somewhere in this range of the
+#: obligation - never all of it (that is a match, not an exception) and never
+#: a sliver (below MIN_LEG_SHARE it is closer to noise than a payment).
+#: _fraction_blocking_candidates uses these to propose the pairs Channel 1 and
+#: Channel 2 both structurally cannot: amount_proximity is 0 for anything
+#: outside AMOUNT_TOLERANCE of *equal*, and a leg is by definition not equal
+#: to the obligation, so neither channel ever nominates one on amount grounds.
+MIN_LEG_SHARE = 0.05
+MAX_LEG_SHARE = 0.95
+
 _WHITESPACE = re.compile(r"\s+")
 _NOISE = re.compile(r"[^a-z0-9 ]+")
 
@@ -355,6 +365,81 @@ class FuzzyMatcher:
 
         return pairs
 
+    def _fraction_blocking_candidates(
+        self,
+        internal: pd.DataFrame,
+        external: pd.DataFrame,
+        date_tolerance_days: int,
+        max_block_candidates: int = 10,
+    ) -> set[tuple[int, int]]:
+        """Third candidate channel: an external row that plausibly settles
+        *part* of an internal row's amount, not roughly all of it.
+
+        Channel 1 (description clustering) is a split or partial-payment
+        leg's only path to being nominated today, because Channel 2 blocks on
+        near-equal amounts and a leg is never near-equal by definition. That
+        is fine at small scale, where a leg's description similarity (diluted
+        by "(part n/m)" or simply not being the obligation's own text) still
+        edges out unrelated rows for one of Channel 1's top-K slots. It stops
+        being fine as the batch grows relative to a bounded narrative
+        vocabulary: every exact-duplicate-text decoy scores a clean 1.0 and
+        outranks a genuine leg's diluted similarity, so decoy density (not K)
+        decides whether a leg survives the cut - and decoy density grows with
+        the batch while K does not. This channel proposes those pairs on
+        amount alone, so recovering a leg never depends on winning that race.
+
+        The same cost-control shape as `_blocking_candidates`: only the
+        `max_block_candidates` nearest by amount survive per internal row, so
+        a wide fractional band on a large settlement cannot go quadratic.
+        """
+        if "amount" not in internal.columns or "amount" not in external.columns:
+            return set()
+
+        external_amounts = pd.to_numeric(external["amount"], errors="coerce").to_numpy(
+            dtype=float
+        )
+        internal_amounts = pd.to_numeric(internal["amount"], errors="coerce").to_numpy(
+            dtype=float
+        )
+
+        order = np.argsort(external_amounts, kind="stable")
+        sorted_amounts = external_amounts[order]
+
+        internal_dates = pd.to_datetime(internal.get("txn_date"), errors="coerce")
+        external_dates = pd.to_datetime(external.get("txn_date"), errors="coerce")
+
+        pairs: set[tuple[int, int]] = set()
+
+        for i, amount in enumerate(internal_amounts):
+            if not np.isfinite(amount) or amount <= 0:
+                continue
+
+            low = np.searchsorted(sorted_amounts, amount * MIN_LEG_SHARE, side="left")
+            high = np.searchsorted(sorted_amounts, amount * MAX_LEG_SHARE, side="right")
+            if low >= high:
+                continue
+
+            in_window = order[low:high]
+
+            if len(in_window) > max_block_candidates:
+                # Closest to the full amount first - the largest plausible
+                # leg is also the one likeliest to be a genuine partial
+                # payment rather than one piece of a longer split.
+                gaps = np.abs(external_amounts[in_window] - amount)
+                in_window = in_window[
+                    np.argpartition(gaps, max_block_candidates)[:max_block_candidates]
+                ]
+
+            for position in in_window:
+                if internal_dates is not None and external_dates is not None:
+                    left, right = internal_dates.iloc[i], external_dates.iloc[position]
+                    if pd.notna(left) and pd.notna(right):
+                        if abs((left - right).days) > date_tolerance_days:
+                            continue
+                pairs.add((i, int(position)))
+
+        return pairs
+
     def find_candidates(
         self,
         internal: pd.DataFrame,
@@ -365,11 +450,14 @@ class FuzzyMatcher:
     ) -> tuple[list[CandidatePair], set[int], set[int]]:
         """Propose internal-to-external pairs.
 
-        Two channels, unioned: DBSCAN cluster co-membership (Sec. 9's method)
-        and amount/date blocking (see `_blocking_candidates` for why both are
-        needed). Returns (candidates, isolated internal positions, isolated
-        external positions). Isolated rows are LOF outliers with no cluster -
-        "real exceptions, not near-matches" - so they skip scoring entirely.
+        Three channels, unioned: DBSCAN cluster co-membership (Sec. 9's
+        method), amount/date blocking for near-equal pairs, and amount/date
+        blocking for fractional pairs (see `_blocking_candidates` and
+        `_fraction_blocking_candidates` for why neither of the first two
+        alone covers a split or partial payment). Returns (candidates,
+        isolated internal positions, isolated external positions). Isolated
+        rows are LOF outliers with no cluster - "real exceptions, not
+        near-matches" - so they skip scoring entirely.
         """
         if internal.empty or external.empty:
             return [], set(), set()
@@ -411,10 +499,15 @@ class FuzzyMatcher:
             internal, external, amount_tolerance, date_tolerance_days
         )
 
-        # Similarity is attached once, from the shared matrix, so both channels
-        # produce identically-comparable scores. Computed in one vectorised
-        # pass - a cosine_similarity() call per candidate was pure numpy
-        # call overhead repeated tens of thousands of times.
+        # Channel 3: fractional amount blocking (splits and partial payments).
+        proposed |= self._fraction_blocking_candidates(
+            internal, external, date_tolerance_days
+        )
+
+        # Similarity is attached once, from the shared matrix, so all three
+        # channels produce identically-comparable scores. Computed in one
+        # vectorised pass - a cosine_similarity() call per candidate was pure
+        # numpy call overhead repeated tens of thousands of times.
         ordered = sorted(proposed)
         similarities = self._similarities(matrix, ordered, split)
 
