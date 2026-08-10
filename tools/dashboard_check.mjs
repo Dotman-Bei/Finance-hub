@@ -19,9 +19,14 @@
  *
  *     mkdir -p /tmp/dashcheck && cd /tmp/dashcheck && npm init -y
  *     npm install playwright && npx playwright install --with-deps chromium
- *     node /opt/financehub/tools/dashboard_check.mjs
+ *     cp /opt/financehub/tools/dashboard_check.mjs .
+ *     node dashboard_check.mjs
  *
- *     BASE_URL=http://your.host SHOT_DIR=/tmp/shots node .../dashboard_check.mjs
+ * The copy is not optional: node resolves `playwright` relative to the
+ * script's own directory, not the working directory, so running it in place
+ * from tools/ fails with ERR_MODULE_NOT_FOUND however you set the cwd.
+ *
+ *     BASE_URL=https://your.host SHOT_DIR=/tmp/shots node dashboard_check.mjs
  *
  * Screenshots and a report.json land in SHOT_DIR. Exits non-zero if any check
  * fails, so it can gate a deploy.

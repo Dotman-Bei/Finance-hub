@@ -209,8 +209,30 @@ systemctl enable --now "${UNITS[@]}"
 
 # ── nginx ────────────────────────────────────────────────────────────────
 log "Configuring nginx"
-cp "$APP_ROOT/deploy/nginx/financehub.conf" /etc/nginx/sites-available/financehub
-ln -sf /etc/nginx/sites-available/financehub /etc/nginx/sites-enabled/financehub
+NGINX_SITE=/etc/nginx/sites-available/financehub
+
+# Once certbot has run it owns this file: it adds the 443 server, the
+# certificate paths and the HTTP->HTTPS redirect in place. Copying the
+# repo's template over that would silently delete TLS on the next deploy and
+# leave the box serving the sign-in key in clear text - the exact thing the
+# certificate was obtained to prevent. Re-running provision.sh must never be
+# the reason a site stops being encrypted, so the template is only installed
+# when certbot has not taken over.
+if [[ -f "$NGINX_SITE" ]] && grep -q "managed by Certbot" "$NGINX_SITE"; then
+  warn "nginx site is certbot-managed - left untouched to preserve TLS."
+  warn "  To change the proxy rules, edit deploy/nginx/financehub.conf, apply it"
+  warn "  by hand, then re-run: certbot install --cert-name <your.domain> --nginx"
+else
+  cp "$APP_ROOT/deploy/nginx/financehub.conf" "$NGINX_SITE"
+  # certbot needs a concrete server_name to find its server block; the
+  # template ships the `_` catch-all so a nameless box still serves.
+  if [[ -n "${SERVER_NAME:-}" ]]; then
+    sed -i "s/^    server_name _;/    server_name ${SERVER_NAME};/" "$NGINX_SITE"
+    log "nginx server_name set to ${SERVER_NAME}"
+  fi
+fi
+
+ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/financehub
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl reload nginx
