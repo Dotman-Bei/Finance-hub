@@ -19,6 +19,13 @@ No database is touched. The pipelines are I/O-free by construction, so this
 grades the logic without needing Postgres, Redis or a running service.
 
     python tools/verify_corpus.py data/seed
+    python tools/verify_corpus.py data/seed --accuracy
+
+`--accuracy` grades Subsystem 3 against the answer key's
+`expected_category_if_unmatched`, one row per obligation. Previously this was
+a throwaway script run by hand (HANDOFF.md's Sec. 7 table); folding it in here
+means it is graded through the same real code and the same run as everything
+else, instead of a number nobody can reproduce.
 """
 
 from __future__ import annotations
@@ -58,7 +65,9 @@ def _rule(title: str) -> None:
     print(f"\n\033[1m{title}\033[0m\n" + "-" * 62)
 
 
-def verify(directory: Path, threshold: float | None = None) -> dict[str, Any]:
+def verify(
+    directory: Path, threshold: float | None = None, grade_accuracy: bool = False
+) -> dict[str, Any]:
     key = json.loads((directory / "answer_key.json").read_text(encoding="utf-8"))
 
     payloads = normalize((directory / "erp_ledger.csv").read_text(encoding="utf-8"))
@@ -141,6 +150,28 @@ def verify(directory: Path, threshold: float | None = None) -> dict[str, Any]:
     engines: Counter[str] = Counter()
     nominations: Counter[int] = Counter()
 
+    # Graded on the internal (ERP) leg only, never an external one. A split
+    # settlement's external legs each look exactly like a partial payment
+    # viewed alone - that is what "split settlement" means from one receipt's
+    # vantage point, not a classifier error. `pair["internal"]` is always the
+    # obligation side, so keying expectations off it (and never off
+    # `pair["external"]`) is what keeps that ambiguity out of the score.
+    expected_category = {
+        pair["internal"]: pair["expected_category_if_unmatched"]
+        for pair in key["true_pairs"]
+        if pair.get("expected_category_if_unmatched")
+    }
+    archetype_of_internal = {
+        pair["internal"]: pair["archetype"] for pair in key["true_pairs"]
+    }
+    in_key: Counter[str] = Counter(
+        pair["archetype"]
+        for pair in key["true_pairs"]
+        if pair.get("expected_category_if_unmatched")
+    )
+
+    graded: list[tuple[str, str, str, bool]] = []  # (archetype, expected, actual, correct)
+
     for item in reconciliation.unmatched:
         transaction = by_uuid.get(item.transaction_id)
         if transaction is None:
@@ -154,6 +185,13 @@ def verify(directory: Path, threshold: float | None = None) -> dict[str, Any]:
         categories[classification.category] += 1
         engines[classification.engine] += 1
 
+        expected = expected_category.get(transaction.get("external_id"))
+        if expected is not None:
+            archetype = archetype_of_internal[transaction["external_id"]]
+            graded.append(
+                (archetype, expected, classification.category, classification.category == expected)
+            )
+
     _rule("Subsystem 3 - triage")
     print(f"  counterparts nominated {dict(sorted(nominations.items()))}")
     for category in CATEGORIES:
@@ -164,6 +202,48 @@ def verify(directory: Path, threshold: float | None = None) -> dict[str, Any]:
         f"  unreachable         {', '.join(missing) if missing else 'none - all four occur'}"
     )
 
+    accuracy: dict[str, Any] | None = None
+    if grade_accuracy:
+        reached = Counter(archetype for archetype, *_ in graded)
+        right = Counter(archetype for archetype, _, _, ok in graded if ok)
+        total_right = sum(right.values())
+        total_graded = len(graded)
+        overall = 100 * total_right / total_graded if total_graded else 0.0
+
+        _rule("Subsystem 3 - classification accuracy (graded on the obligation leg)")
+        print(f"  engine: {classifier.status()['engine']}")
+        print(f"  {'archetype':<22}{'in key':>8}{'reached queue':>16}{'correct':>10}")
+        for archetype in sorted(in_key):
+            k = in_key[archetype]
+            r = reached.get(archetype, 0)
+            c = right.get(archetype, 0)
+            pct = f"{100 * c / r:.0f}%" if r else "n/a"
+            print(f"  {archetype:<22}{k:>8}{r:>16}{pct:>10}")
+        print(f"\n  overall             {overall:.2f}%   ({total_right}/{total_graded} graded)")
+
+        wrong = [(a, e, act) for a, e, act, ok in graded if not ok]
+        if wrong:
+            print("  misclassified:")
+            for archetype, expected_cat, actual_cat in wrong[:10]:
+                print(f"    {archetype}: expected {expected_cat}, got {actual_cat}")
+            if len(wrong) > 10:
+                print(f"    ... and {len(wrong) - 10} more")
+
+        accuracy = {
+            "engine": classifier.status()["engine"],
+            "overall": overall,
+            "graded": total_graded,
+            "correct": total_right,
+            "by_archetype": {
+                a: {
+                    "in_key": in_key[a],
+                    "reached_queue": reached.get(a, 0),
+                    "correct": right.get(a, 0),
+                }
+                for a in sorted(in_key)
+            },
+        }
+
     return {
         "detection_rate": detection,
         "false_positive_rate": false_positive,
@@ -172,6 +252,7 @@ def verify(directory: Path, threshold: float | None = None) -> dict[str, Any]:
         "pair_recall": recall,
         "categories": dict(categories),
         "unreachable": missing,
+        "classification_accuracy": accuracy,
     }
 
 
@@ -182,6 +263,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="override MATCH_CONFIDENCE_THRESHOLD for this run")
     parser.add_argument("--json", action="store_true", help="emit the summary as JSON")
     parser.add_argument("--verbose", action="store_true", help="show library logging")
+    parser.add_argument(
+        "--accuracy", action="store_true",
+        help="grade Subsystem 3's classification against the answer key, "
+             "one row per obligation (not per leg - see verify()'s docstring "
+             "note on why a split leg is graded once, from the internal side)",
+    )
     args = parser.parse_args(argv)
 
     if not args.verbose:
@@ -190,7 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         logging.disable(logging.CRITICAL)
         warnings.filterwarnings("ignore")
 
-    summary = verify(Path(args.directory), threshold=args.threshold)
+    summary = verify(
+        Path(args.directory), threshold=args.threshold, grade_accuracy=args.accuracy
+    )
 
     if args.json:
         print()
