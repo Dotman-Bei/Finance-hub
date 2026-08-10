@@ -1,6 +1,6 @@
 # FinanceHub shortcut targets (build.md Sec. 4).
 .DEFAULT_GOAL := help
-.PHONY: help env infra down schema migrate revision test clean ps logs seed seed-kafka
+.PHONY: help env infra down schema migrate revision test clean ps logs seed seed-kafka seed-http
 
 PY := .venv/bin/python
 ifeq ($(OS),Windows_NT)
@@ -45,6 +45,9 @@ seed:  ## Generate a corpus to data/seed: make seed n=2000
 
 seed-kafka:  ## Publish a corpus to the raw topic (needs `make infra`): make seed-kafka n=2000
 	$(PY) tools/seed.py --count $(or $(n),400) --sink kafka --out data/seed
+
+seed-http:  ## POST a corpus to the validation pipeline (no broker needed): make seed-http n=2000
+	$(PY) tools/seed.py --count $(or $(n),400) --sink http --out data/seed
 
 down:  ## Stop everything (keeps volumes)
 	docker compose down

@@ -1,0 +1,38 @@
+[Unit]
+Description=FinanceHub retraining scheduler (build.md Sec. 11)
+Documentation=https://github.com/Dotman-Bei/Finance-hub
+After=network-online.target redis-server.service financehub-celery-worker.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+Type=exec
+User=financehub
+Group=financehub
+
+WorkingDirectory=/opt/financehub
+EnvironmentFile=/opt/financehub/.env
+Environment=PYTHONUNBUFFERED=1
+
+# The schedule database must live somewhere writable and durable. /tmp would
+# work until PrivateTmp discarded it on restart, quietly resetting the beat
+# clock on every deploy.
+ExecStart=/opt/financehub/.venv/bin/celery \
+    -A services.exception_handler.app.retrain beat \
+    --loglevel=info --schedule=/var/lib/financehub/celerybeat-schedule
+
+Restart=on-failure
+RestartSec=10s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+ReadWritePaths=/var/lib/financehub
+
+[Install]
+WantedBy=multi-user.target

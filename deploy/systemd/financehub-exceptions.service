@@ -1,0 +1,37 @@
+[Unit]
+Description=FinanceHub exception handler (Subsystem 3, build.md Sec. 10)
+Documentation=https://github.com/Dotman-Bei/Finance-hub
+After=network-online.target postgresql.service redis-server.service financehub-matching.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=financehub
+Group=financehub
+
+WorkingDirectory=/opt/financehub
+EnvironmentFile=/opt/financehub/.env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/financehub/.venv/bin/uvicorn services.exception_handler.app.main:app \
+    --host 127.0.0.1 --port 8003
+
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Shared with the Celery worker, which retrains and rewrites rf_classifier.pkl
+# while this process hot-swaps it on the next classify(). Read-only here would
+# not break startup, but the API also writes on POST /models/train.
+ReadWritePaths=/opt/financehub/services/exception_handler/models
+
+[Install]
+WantedBy=multi-user.target

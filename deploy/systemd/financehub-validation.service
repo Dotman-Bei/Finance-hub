@@ -1,0 +1,39 @@
+[Unit]
+Description=FinanceHub validation pipeline (Subsystem 2, build.md Sec. 8)
+Documentation=https://github.com/Dotman-Bei/Finance-hub
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=financehub
+Group=financehub
+
+# WorkingDirectory is the repo root, not the service directory: every service
+# imports `shared.*` and `services.*`, which only resolve from here.
+WorkingDirectory=/opt/financehub
+EnvironmentFile=/opt/financehub/.env
+Environment=PYTHONUNBUFFERED=1
+
+# 127.0.0.1, not 0.0.0.0. Without Docker there is no network namespace between
+# this process and the internet; nginx is the only thing that should be
+# publicly bound.
+ExecStart=/opt/financehub/.venv/bin/uvicorn services.validation_pipeline.app.main:app \
+    --host 127.0.0.1 --port 8001
+
+Restart=on-failure
+RestartSec=5s
+
+# Hardening. This service writes only to PostgreSQL, so it needs no writable
+# path of its own.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

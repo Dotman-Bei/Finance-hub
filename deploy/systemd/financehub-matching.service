@@ -1,0 +1,37 @@
+[Unit]
+Description=FinanceHub matching engine (Subsystem 1, build.md Sec. 9)
+Documentation=https://github.com/Dotman-Bei/Finance-hub
+After=network-online.target postgresql.service financehub-validation.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=financehub
+Group=financehub
+
+WorkingDirectory=/opt/financehub
+EnvironmentFile=/opt/financehub/.env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/financehub/.venv/bin/uvicorn services.matching_engine.app.main:app \
+    --host 127.0.0.1 --port 8002
+
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Fitted clustering models are persisted here (build.md Sec. 9, "Model
+# persistence"). Without this ProtectSystem=strict makes the write fail and
+# every restart silently falls back to a per-batch vocabulary.
+ReadWritePaths=/opt/financehub/services/matching_engine/models
+
+[Install]
+WantedBy=multi-user.target

@@ -40,16 +40,22 @@ It also emits two things no test generator produces:
 
 Where it writes
 ---------------
-`files` or `kafka` - never Postgres. The architecture invariant is that
-nothing reaches the database without passing validation first (build.md
+`files`, `kafka` or `http` - never Postgres. The architecture invariant is
+that nothing reaches the database without passing validation first (build.md
 Sec. 8: "It's the front door; nothing reaches the DB without it"). A seeder
 that INSERTed directly would fabricate the very guarantee the system exists
 to provide, and every downstream number would be measuring a fiction.
+
+`http` POSTs to the validation pipeline's /validate, which normalises `raw`
+through the same Pandas path Kafka messages take. It is the route for a host
+running without a broker (`CONSUME_KAFKA=false`), as the bare-metal
+deployment in deploy/ does - a different door into the same front door.
 
 Usage
 -----
     python tools/seed.py --count 2000 --sink files --out data/seed
     python tools/seed.py --count 2000 --sink kafka
+    python tools/seed.py --count 2000 --sink http --validate-url http://127.0.0.1:8001
 
 The answer key is written alongside as `answer_key.json` and keyed on
 `external_id` (ERP-xxxxxx / BNK-xxxxxx), never on UUID: primary keys are
@@ -562,6 +568,70 @@ def _publish_kafka(corpus: Corpus, args: argparse.Namespace) -> None:
     print(f"  {key_path}")
 
 
+def _publish_http(corpus: Corpus, args: argparse.Namespace) -> int:
+    """POST both feeds to the validation pipeline's /validate endpoint.
+
+    The route for a host with no broker (`CONSUME_KAFKA=false`), which is how
+    the bare-metal deployment in deploy/ runs. `/validate` puts `raw` through
+    the same Pandas normalisation Kafka messages take, so the data crosses
+    exactly the same four stages either way - this is a different door into the
+    same front door, not a bypass of it.
+
+    `persist=true` is what makes the records reach PostgreSQL, and therefore
+    the dashboard. Without it the endpoint grades the batch and discards it.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = args.validate_url.rstrip("/") + "/validate"
+    sent = quarantined = failed = 0
+
+    def post(raw: str) -> None:
+        nonlocal sent, quarantined, failed
+        body = json.dumps({"raw": raw, "persist": True}).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=args.timeout) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as exc:
+            failed += 1
+            print(f"  ! {exc.code} from {url}: {exc.read()[:200].decode('utf-8', 'replace')}")
+            return
+        except OSError as exc:
+            failed += 1
+            print(f"  ! could not reach {url}: {exc}")
+            return
+
+        sent += payload.get("total", 0)
+        quarantined += payload.get("quarantined", 0)
+
+    for start in range(0, len(corpus.erp_rows), args.batch_size):
+        chunk = corpus.erp_rows[start : start + args.batch_size]
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=list(chunk[0]))
+        writer.writeheader()
+        writer.writerows(chunk)
+        post(buffer.getvalue())
+
+    for start in range(0, len(corpus.bank_rows), args.batch_size):
+        chunk = corpus.bank_rows[start : start + args.batch_size]
+        post(json.dumps(chunk, default=str))
+
+    print(f"  submitted {sent} records to {url}")
+    print(f"  quarantined by the pipeline: {quarantined}")
+    if failed:
+        print(f"  {failed} batch(es) failed - see errors above")
+
+    key_path = Path(args.out) / "answer_key.json"
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(json.dumps(_answer_key(corpus, args), indent=2, default=str), encoding="utf-8")
+    print(f"  {key_path}")
+
+    return failed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate a two-sided reconciliation corpus with an answer key.",
@@ -577,13 +647,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="fraction of bank records carrying a real sha256 checksum")
     parser.add_argument("--seed", type=int, default=20260809,
                         help="RNG seed; the same seed always yields the same corpus")
-    parser.add_argument("--sink", choices=("files", "kafka"), default="files",
+    parser.add_argument("--sink", choices=("files", "kafka", "http"), default="files",
                         help="where to write; never Postgres, which must be reached through validation")
     parser.add_argument("--out", default="data/seed",
-                        help="output directory (files sink, and the answer key in both)")
+                        help="output directory (files sink, and the answer key in all three)")
     parser.add_argument("--topic", default=None, help="Kafka topic (default: KAFKA_TOPIC_RAW)")
     parser.add_argument("--brokers", default=None, help="Kafka brokers (default: KAFKA_BROKER)")
-    parser.add_argument("--batch-size", type=int, default=200, help="records per Kafka message")
+    parser.add_argument("--validate-url", default="http://127.0.0.1:8001",
+                        help="validation pipeline base URL (http sink)")
+    parser.add_argument("--timeout", type=float, default=120.0,
+                        help="per-batch HTTP timeout in seconds (http sink)")
+    parser.add_argument("--batch-size", type=int, default=200,
+                        help="records per Kafka message or HTTP batch")
     args = parser.parse_args(argv)
 
     if args.count < len(ARCHETYPES):
@@ -606,8 +681,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.sink == "files":
         _write_files(corpus, Path(args.out), args)
-    else:
+    elif args.sink == "kafka":
         _publish_kafka(corpus, args)
+    else:
+        # A run that reached nothing must not report success: provisioning
+        # chains this, and a silent 0 would look like a seeded database.
+        if _publish_http(corpus, args):
+            return 1
 
     return 0
 

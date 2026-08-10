@@ -1,0 +1,37 @@
+[Unit]
+Description=FinanceHub reporting API (Subsystem 4 backend, build.md Sec. 12)
+Documentation=https://github.com/Dotman-Bei/Finance-hub
+After=network-online.target postgresql.service redis-server.service financehub-exceptions.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=financehub
+Group=financehub
+
+WorkingDirectory=/opt/financehub
+EnvironmentFile=/opt/financehub/.env
+Environment=PYTHONUNBUFFERED=1
+
+# --ws websockets matches the container image: WS /ws/exceptions is the live
+# feed, and uvicorn's default wsproto backend is not what this was tested on.
+# --proxy-headers so the app sees the client address nginx forwards rather
+# than 127.0.0.1 for every request.
+ExecStart=/opt/financehub/.venv/bin/uvicorn services.reporting_api.app.main:app \
+    --host 127.0.0.1 --port 8000 --ws websockets --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1
+
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

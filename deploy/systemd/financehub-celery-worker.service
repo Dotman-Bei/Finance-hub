@@ -1,0 +1,39 @@
+[Unit]
+Description=FinanceHub retraining worker (build.md Sec. 11)
+Documentation=https://github.com/Dotman-Bei/Finance-hub
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+Requires=postgresql.service redis-server.service
+
+[Service]
+Type=exec
+User=financehub
+Group=financehub
+
+WorkingDirectory=/opt/financehub
+EnvironmentFile=/opt/financehub/.env
+Environment=PYTHONUNBUFFERED=1
+
+# --concurrency=1 deliberately. Retraining is CPU-bound scikit-learn work;
+# a second worker buys nothing and risks two processes writing
+# rf_classifier.pkl at once.
+ExecStart=/opt/financehub/.venv/bin/celery \
+    -A services.exception_handler.app.retrain worker \
+    --loglevel=info --concurrency=1
+
+Restart=on-failure
+RestartSec=10s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# This is the process that writes the retrained model.
+ReadWritePaths=/opt/financehub/services/exception_handler/models
+
+[Install]
+WantedBy=multi-user.target
