@@ -70,7 +70,7 @@ class ReconcileResponse(BaseModel):
     threshold: float
     duration_ms: float
     total_input: int
-    persistence: dict[str, int] | None = None
+    persistence: dict[str, int | str] | None = None
 
 
 @asynccontextmanager

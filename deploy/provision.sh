@@ -138,10 +138,16 @@ if [[ "$db_exists" != "1" ]]; then
   log "Applying db/schema.sql"
   # schema.sql is written to be re-runnable, but it only *needs* to run once,
   # on the empty database Docker's entrypoint would otherwise have handled.
-  sudo -u postgres psql -q -d "$DB_NAME" -f "$APP_ROOT/db/schema.sql"
-  sudo -u postgres psql -q -d "$DB_NAME" -c \
-    "GRANT ALL ON ALL TABLES IN SCHEMA public TO ${DB_USER};
-     GRANT ALL ON SCHEMA public TO ${DB_USER};"
+  #
+  # Applied as $APP_USER, not postgres: DB_USER owns the database, and on
+  # PG15+ the owner's session gets implicit CREATE on public via
+  # pg_database_owner, so objects it creates come out owned by DB_USER too.
+  # Applying as postgres instead leaves every table owned by postgres —
+  # GRANT ALL hands DB_USER DML rights but not ownership, so DB_USER's own
+  # DATABASE_URL can never re-run schema.sql (ALTER/CREATE TRIGGER/CREATE OR
+  # REPLACE FUNCTION all require owning the object), breaking the "more than
+  # one path may apply it" guarantee schema.sql is written to.
+  sudo -u "$APP_USER" psql -q -d "$DB_NAME" -f "$APP_ROOT/db/schema.sql"
 else
   warn "Database ${DB_NAME} exists — schema not reapplied."
 fi
