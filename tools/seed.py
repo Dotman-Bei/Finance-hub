@@ -98,15 +98,41 @@ from shared.models.enums import ExceptionCategory  # noqa: E402
 
 logger = logging.getLogger("seed")
 
+#: Counterparty and narrative pools. Their *product* is what matters: it sets
+#: how many rows end up sharing byte-identical description text, and that
+#: number - not the corpus size itself - is what the matcher's description
+#: channel has to discriminate against.
+#:
+#: At the original 15 x 5 = 75 combinations a 5,000-pair corpus put ~140 rows
+#: on every description, and classification accuracy fell from 90% at 800
+#: pairs to 72% at 5,000. That decline measured the generator, not the engine:
+#: a real feed carries far more distinct narratives than 75. Widened to
+#: 40 x 15 = 600 so the same 5,000 pairs sit at ~17 rows per description,
+#: which is where the 800-pair corpus already was. Anything left over after
+#: this is the engine's.
 COUNTERPARTIES = [
     "Meridian Capital Ltd", "Northwind Logistics", "Arcadia Payments BV",
     "Solstice Retail Group", "Tessellate Software Inc", "Harborline Freight",
     "Lumen Energy Partners", "Vantage Clearing House", "Kestrel Media SA",
     "Orion Manufacturing", "Bluepeak Insurance", "Cadence Health Systems",
     "Fairmount Trading Co", "Silverbrook Holdings", "Ridgeway Chemicals",
+    "Ashford Textiles PLC", "Brightwater Utilities", "Calderon Shipping SA",
+    "Drayton Pharmaceuticals", "Eastgate Property Group", "Fenwick Aerospace",
+    "Glenmore Foods Ltd", "Halcyon Asset Management", "Ironbridge Steel Co",
+    "Juniper Telecom NV", "Kingsway Automotive", "Larkspur Biotech",
+    "Marlowe Publishing", "Nightingale Care Homes", "Oakhurst Agriculture",
+    "Pinnacle Construction", "Quarry Lane Minerals", "Rosewood Hospitality",
+    "Stonegate Financial", "Thornbury Packaging", "Umbra Analytics GmbH",
+    "Verdant Renewables", "Westbrook Marine", "Yarrow Consulting LLP",
+    "Zenith Components AB",
 ]
 
-NARRATIVES = ["settlement", "invoice remittance", "wire transfer", "ACH credit", "card batch"]
+NARRATIVES = [
+    "settlement", "invoice remittance", "wire transfer", "ACH credit",
+    "card batch", "direct debit", "standing order", "bill payment",
+    "supplier payout", "payroll run", "refund adjustment", "FX settlement",
+    "intercompany transfer", "escrow release", "commission payment",
+]
 EXTERNAL_SOURCES = ["bank_api", "payment_gateway"]
 
 #: Archetype -> the category the exception handler should reach *if* the pair
