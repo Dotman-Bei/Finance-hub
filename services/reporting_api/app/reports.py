@@ -141,7 +141,7 @@ def gather(
     if report_type == "AUDIT_TRAIL":
         # A report titled "Full Audit Trail" that carried no audit rows was
         # the clearest symptom that report_type reached nothing but the title.
-        audit = query_trail(session, limit=exception_limit)
+        audit = query_trail(session, limit=exception_limit)["items"]
         actors = actor_activity(session, limit=25)
 
     return {
@@ -245,7 +245,7 @@ def _actors_table(data: dict[str, Any]) -> list[list[str]]:
     for row in data.get("actors", [])[:25]:
         table.append([
             str(row.get("actor", "—")),
-            str(row.get("actions", row.get("count", "—"))),
+            str(row.get("changes", "—")),
             str(row.get("first_seen", "—"))[:19].replace("T", " "),
             str(row.get("last_seen", "—"))[:19].replace("T", " "),
         ])
