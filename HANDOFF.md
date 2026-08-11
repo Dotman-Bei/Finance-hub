@@ -8,14 +8,13 @@ Last updated 2026-08-10. Branch `main`, pushed to
 `github.com/Dotman-Bei/Finance-hub`.
 
 **What changed this session:** the system was deployed and run for real on a
-VPS for the first time, driven in a real browser, put behind TLS, and its
-retrain loop exercised end to end — §3 is substantially rewritten as a
-result. It is live at **https://financehub-demo.duckdns.org**. Seven bugs
-found and fixed, all of them invisible to the test suite because they only
-exist once the thing runs as services against a real database. Read §7's
-warning about the model now on the box before quoting any forest number. `TIMING_DIFFERENCE` went 0% → 100%, `SPLIT_SETTLEMENT` 16% →
-71% at 5000-pair scale, accuracy grading became `verify_corpus.py --accuracy`,
-and `make chapter4` now emits the whole results table in one command.
+VPS for the first time, driven in a real browser, put behind TLS, had its
+retrain loop exercised end to end, and finally had every endpoint of the
+running deployment checked — §3 is substantially rewritten as a result. It is
+live at **https://financehub-demo.duckdns.org**. Nine bugs found and fixed,
+every one of them invisible to the test suite because they only exist once the
+thing runs as services against a real database. Read §7's warning about the
+model now on the box before quoting any forest number.
 
 ---
 
@@ -45,22 +44,26 @@ build.md's phases 0–6 are complete. There is no Phase 7. Everything since has
 been closing gaps found by actually exercising the thing.
 
 ```
-78686a9  Add tools/chapter4.py: one command, one results table
-002783e  Block fractional candidates by counterparty: fixes the P4 scale collapse
-d921d64  Add fraction-blocking Channel 3 for split/partial-payment legs
-46eba80  Raise max_candidates_per_row: SPLIT_SETTLEMENT was starved of its own legs
-439f3be  Fold accuracy grading into verify_corpus.py as --accuracy
-3ff48c6  Fix TIMING_DIFFERENCE: 0% classification accuracy on genuine timing pairs
-260b35d  Fix two bugs found running the system live for the first time
-e6f02a0  Add HANDOFF.md: state, invariants and priorities for the next session
-6268934  Draw obligations from a real corpus; add corpus verification
-1202bef  Add deploy/: bare-metal VPS deployment, no Docker
-956b5de  Add the sign-in flow: the dashboard could not authenticate at all
-6d2a6a3  Make SPLIT_SETTLEMENT reachable: nominate co-settling candidates
-3383ac0  Add tools/seed.py: two-sided corpus generator with a retained answer key
-407a0fe  Phase 6 follow-up: complete the frontend lint gate, refresh stale docs
-9d3df3d  Phase 6: hardening — audit gate, end-to-end tests, load test, CI
-3271be7  FinanceHub: automated reconciliation system, phases 0-5
+6b582f8 Add tools/e2e_check.py: exercise every endpoint of a running deployment
+2f72a9d Fix AUDIT_TRAIL against the real audit helper shapes
+c5999f7 Make the report type select content, not just the heading
+d3751ee HANDOFF: the queue now triages itself
+8b9bb26 Schedule triage: the open queue was only ever swept by hand
+6c114bc HANDOFF: the retrain loop is proven, the labels are not
+d2f64d3 Measure the first retrained model against the bootstrap rules
+cd6cd16 HANDOFF: TLS is live; record the two ways it can be undone
+7ffdee4 Do not let provision.sh delete TLS on the next deploy
+8ac5de8 Add tools/dashboard_check.mjs; record what the browser verified
+a3dd1d7 Fix a 500 on any re-submitted record: duplicates crashed the pipeline
+25906e1 Fix two bugs a browser found: the dashboard rendered nothing
+24e3547 Update HANDOFF and README: the system has now been run for real
+78686a9 Add tools/chapter4.py: one command, one results table
+002783e Block fractional candidates by counterparty: fixes the P4 scale collapse
+d921d64 Add fraction-blocking Channel 3 for split/partial-payment legs
+46eba80 Raise max_candidates_per_row: SPLIT_SETTLEMENT was starved of its own legs
+439f3be Fold accuracy grading into verify_corpus.py as --accuracy
+3ff48c6 Fix TIMING_DIFFERENCE: 0% classification accuracy on genuine timing pairs
+260b35d Fix two bugs found running the system live for the first time
 ```
 
 **307 tests, one failing.** The count rose from 290 because
@@ -101,6 +104,14 @@ substantially on 2026-08-10: the system has now been run for real.**
   exception queue, a live `exception.created` burst arriving over the
   WebSocket during a reconcile, and the Auditor role being offered no Resolve
   control. This found three real bugs on first contact (`25906e1`, `a3dd1d7`).
+- **Every endpoint of the running system is exercised** by
+  `tools/e2e_check.py` (`make e2e`): 48 assertions over all four services -
+  every documented route, all three roles against the permission matrix, all
+  four report types downloaded and parsed, and the label rules. Passes both on
+  loopback (47/47) and through nginx + TLS (48/48). It found three things
+  nothing else had: the matching engine running without persisted models, four
+  report types that were one report with four titles, and an AUDIT_TRAIL
+  report containing no audit rows.
 - **The queue triages itself.** `financehub.triage.triage_open` runs on a
   two-minute beat interval; verified live by seeding, reconciling, then
   *waiting* — 495 untriaged rows went to 1 without intervention, classified
@@ -124,6 +135,7 @@ substantially on 2026-08-10: the system has now been run for real.**
 |---|---|
 | `docker compose up` | **Never run.** Docker is not installed anywhere in play |
 | Kafka ingestion | Never run against a live broker (`CONSUME_KAFKA=false` by design here) |
+| A *successful* quarantine replay | The endpoint works and refuses to fake success; no record here can pass on a re-run. See §8 P0 |
 
 The old warning that "the assembled system has never actually run as
 services" is now **obsolete**. It found two real bugs on first boot, both
@@ -183,6 +195,7 @@ FINALS/
 │   ├── verify_corpus.py    # grade a corpus through the real code (--accuracy)
 │   ├── chapter4.py         # every gate + corpus grading -> one results table
 │   ├── dashboard_check.mjs # drives the deployed dashboard in a real browser
+│   ├── e2e_check.py        # every endpoint of a running deployment
 │   └── requirements.txt    # openpyxl — tools only, not services
 ├── deploy/                 # bare-metal VPS: provision.sh, systemd, nginx
 └── tests/                  # cross-subsystem e2e + integration
@@ -204,6 +217,10 @@ make verify                    # grade data/seed against its answer key
 # results
 make chapter4                  # gates + corpus grading + the objectives table
 make chapter4 n=5000           # at the sample size worth defending
+
+# the running deployment
+make e2e                       # every endpoint, all three roles, all four reports
+python tools/e2e_check.py --base https://your.host   # through nginx and TLS too
 ```
 
 **`tools/seed.py`** emits *raw vendor-shaped* payloads — ERP as CSV, bank as
@@ -355,14 +372,31 @@ fix**, so it was left alone. Decide it deliberately before touching it.
 **P0–P5 from the previous handoff are done** (2026-08-10). What follows is
 what is left, renumbered.
 
-### P0 — Decide the precision gate deliberately
+### P0 — Two features work but have never been proven to *do* anything
+
+Both pass their endpoint checks, and neither has been shown to produce its
+intended outcome, because the data to do so does not exist here:
+
+* **Quarantine replay.** `POST /quarantine/replay` correctly re-runs stored
+  payloads and correctly refuses to mark still-failing records as replayed -
+  verified on 25 rows across all three stages, all of which stayed
+  quarantined. But every quarantined record here is *permanently* malformed
+  (seed.py generates them that way), and replay re-sends the stored bytes
+  verbatim, so the success path cannot fire. It needs a record that failed for
+  a reason that has since changed - a corrected checksum secret, a relaxed
+  business rule - to show `replayed > 0` and `replayed_at` being set.
+* **`SYSTEM_ADMINISTRATOR` beyond permissions.** The role authenticates and is
+  correctly allowed and denied the right things, but nothing exercises what it
+  exists *for* over and above FINANCE_MANAGER.
+
+### P1 — Decide the precision gate deliberately
 
 See §7. Pre-existing, deterministic, one genuinely ambiguous pair out of 95,
 and the "fix" is an engine design decision with a real recall cost. It should
 be *decided*, not left failing indefinitely — a permanently red gate trains
 everyone to ignore the suite.
 
-### P1 — Classification accuracy at scale
+### P2 — Classification accuracy at scale
 
 72.45% at 5000 pairs against 90.00% at 800. Much of the gap is corpus
 vocabulary (see §7), so the two honest options are different in kind:
@@ -379,7 +413,7 @@ vocabulary (see §7), so the two honest options are different in kind:
   `randint(0, 4)` back off the generator, which is fitting the corpus rather
   than the phenomenon. Do not redo those two experiments.
 
-### P2 — Real human feedback
+### P3 — Real human feedback
 
 The loop is proven; the labels are not. Everything the forest knows came from
 an answer-key replay (§7). Genuine reviewer decisions through the dashboard
