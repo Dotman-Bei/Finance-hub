@@ -57,8 +57,34 @@ class ScoredPair:
     components: dict[str, float] = field(default_factory=dict)
 
     def persists(self, threshold: float) -> bool:
-        """True -> matchedrecords. False -> exceptionqueue (Sec. 9)."""
-        return self.confidence >= threshold
+        """True -> matchedrecords. False -> exceptionqueue (Sec. 9).
+
+        Clearing the threshold is necessary but not sufficient: the pair also
+        has to agree on something that identifies it, meaning either the
+        amounts match exactly or the two references match.
+
+        Description similarity cannot play that role however high it scores.
+        Two transactions from the same counterparty carry the same narrative
+        by construction, so a 1.0 there says "same counterparty", not "same
+        payment" - and weighted at 0.40 it can carry a pair over the line on
+        its own. That is how the engine confirmed two *different* obligations
+        from one counterparty whose amounts were 0.87% apart and whose bank
+        side had no reference at all: description 1.0, amount 0.96, reference
+        neutral, total 0.86 against a 0.85 threshold.
+
+        This is the asymmetry the gate is built on. A wrong match silently
+        corrupts the ledger; a declined one lands in the exception queue where
+        a human sees it, with its candidate still nominated. Sec. 10 also
+        *wants* partial payments reviewed rather than auto-posted, so most of
+        what this refuses is what should have been refused anyway.
+        """
+        if self.confidence < threshold:
+            return False
+        amounts_agree = self.components.get("amount", 0.0) >= 0.999
+        references_agree = self.components.get("reference", 0.0) >= 0.999
+        # An exact rule-layer match carries no components; it agreed on
+        # reference, amount and date by definition.
+        return amounts_agree or references_agree or self.match_type == "RULE"
 
 
 def _to_decimal(value: Any) -> Decimal | None:

@@ -15,7 +15,7 @@ import pytest
 
 from services.matching_engine.app.ml_model import FuzzyMatcher, normalize_description
 from services.matching_engine.app.pipeline import MatchingPipeline
-from services.matching_engine.app.rule_engine import rule_match, split_by_side
+from services.matching_engine.app.rule_engine import RULE_CONFIDENCE, rule_match, split_by_side
 from services.matching_engine.app.scoring import (
     ScoredPair,
     amount_proximity,
@@ -191,12 +191,61 @@ def test_one_to_one_resolution_prefers_higher_confidence():
 
 
 def test_threshold_partitions_correctly():
+    # Both carry an exact amount agreement, so the only thing separating them
+    # is the threshold - which is what this asserts. `persists` also requires
+    # a corroborating signal (see the tests below), so a pair with no
+    # components at all can never persist and would not exercise the split.
+    agree = {"amount": 1.0, "reference": 0.5}
     pairs = [
-        ScoredPair(internal_id=1, external_id=2, confidence=0.90),
-        ScoredPair(internal_id=3, external_id=4, confidence=0.80),
+        ScoredPair(internal_id=1, external_id=2, confidence=0.90, components=agree),
+        ScoredPair(internal_id=3, external_id=4, confidence=0.80, components=agree),
     ]
     above, below = partition_by_threshold(pairs, 0.85)
     assert len(above) == 1 and len(below) == 1
+
+
+def test_clearing_the_threshold_is_not_enough_to_auto_confirm():
+    """A pair must agree on amount or reference, not just look similar.
+
+    Description similarity is weighted 0.40 and two transactions from one
+    counterparty carry the same narrative by construction, so a 1.0 there can
+    carry a pair over the line while saying only "same counterparty". That is
+    how the engine confirmed two different obligations 0.87% apart in amount
+    whose bank side had no reference: 1.0 description, 0.96 amount, neutral
+    reference, 0.86 total against a 0.85 threshold.
+    """
+    similar_only = ScoredPair(
+        internal_id=1, external_id=2, confidence=0.86,
+        components={"description": 1.0, "amount": 0.957, "date": 0.5, "reference": 0.5},
+    )
+    assert not similar_only.persists(0.85), (
+        "a pair with neither an exact amount nor an agreeing reference was "
+        "auto-confirmed on description similarity alone"
+    )
+
+    amount_agrees = ScoredPair(
+        internal_id=1, external_id=2, confidence=0.86,
+        components={"description": 0.3, "amount": 1.0, "date": 0.5, "reference": 0.5},
+    )
+    reference_agrees = ScoredPair(
+        internal_id=1, external_id=2, confidence=0.86,
+        components={"description": 0.3, "amount": 0.9, "date": 0.5, "reference": 1.0},
+    )
+    assert amount_agrees.persists(0.85)
+    assert reference_agrees.persists(0.85)
+
+    # Below the threshold nothing persists, corroborated or not.
+    assert not amount_agrees.persists(0.99)
+
+
+def test_a_rule_layer_match_still_persists():
+    """Layer 1 agreed on reference, amount and date by definition, and carries
+    no scoring components to prove it with."""
+    exact = ScoredPair(
+        internal_id=1, external_id=2, confidence=RULE_CONFIDENCE,
+        match_type="RULE", components={"exact_key_match": 1.0},
+    )
+    assert exact.persists(0.85)
 
 
 # ── Layer 2: fuzzy matcher ───────────────────────────────────────────────
