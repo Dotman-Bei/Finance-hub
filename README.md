@@ -27,7 +27,7 @@ build.md §14 calls for.
 | **5** | Feedback loop + retraining | ✅ **done** — gate: 0.84 → 1.00 over rolling rounds |
 | **6** | Hardening | ✅ **done** — audit gate, e2e, load test, CI |
 | **—** | Whole-system verification | ✅ **done** — 318 tests green, every endpoint exercised on the running deployment, dashboard driven in a browser |
-| **—** | Deployed and run as real services | ✅ **done** — VPS, six systemd units, data through every hop, RBAC and audit trigger verified live. No TLS yet |
+| **—** | Deployed and run as real services | ✅ **done** — VPS behind TLS at https://financehub-demo.duckdns.org — six systemd units, data through every hop, RBAC and audit trigger verified live |
 
 ---
 
