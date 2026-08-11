@@ -1,6 +1,6 @@
 # FinanceHub shortcut targets (build.md Sec. 4).
 .DEFAULT_GOAL := help
-.PHONY: help env infra down schema migrate revision test clean ps logs seed seed-kafka seed-http seed-real verify chapter4
+.PHONY: help env infra down schema migrate revision test clean ps logs seed seed-kafka seed-http seed-real verify chapter4 e2e
 
 PY := .venv/bin/python
 ifeq ($(OS),Windows_NT)
@@ -51,6 +51,9 @@ seed-http:  ## POST a corpus to the validation pipeline (no broker needed): make
 
 seed-real:  ## Seed from a real corpus: make seed-real d=online_retail_II.zip n=2000
 	$(PY) tools/seed.py --count $(or $(n),400) --from-dataset $(d) --out data/seed
+
+e2e:  ## Exercise every endpoint of the running deployment: make e2e
+	$(PY) tools/e2e_check.py
 
 verify:  ## Grade data/seed against its answer key through the real pipelines
 	$(PY) tools/verify_corpus.py data/seed
