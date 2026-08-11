@@ -44,6 +44,9 @@ build.md's phases 0–6 are complete. There is no Phase 7. Everything since has
 been closing gaps found by actually exercising the thing.
 
 ```
+618d4e6 Require a corroborating signal before auto-confirming a match
+9e8cba2 Widen the corpus vocabulary: most of the scale decline was the generator
+7692145 HANDOFF: record full endpoint coverage and what is honestly left
 6b582f8 Add tools/e2e_check.py: exercise every endpoint of a running deployment
 2f72a9d Fix AUDIT_TRAIL against the real audit helper shapes
 c5999f7 Make the report type select content, not just the heading
@@ -53,23 +56,14 @@ d3751ee HANDOFF: the queue now triages itself
 d2f64d3 Measure the first retrained model against the bootstrap rules
 cd6cd16 HANDOFF: TLS is live; record the two ways it can be undone
 7ffdee4 Do not let provision.sh delete TLS on the next deploy
-8ac5de8 Add tools/dashboard_check.mjs; record what the browser verified
-a3dd1d7 Fix a 500 on any re-submitted record: duplicates crashed the pipeline
-25906e1 Fix two bugs a browser found: the dashboard rendered nothing
-24e3547 Update HANDOFF and README: the system has now been run for real
-78686a9 Add tools/chapter4.py: one command, one results table
-002783e Block fractional candidates by counterparty: fixes the P4 scale collapse
-d921d64 Add fraction-blocking Channel 3 for split/partial-payment legs
-46eba80 Raise max_candidates_per_row: SPLIT_SETTLEMENT was starved of its own legs
-439f3be Fold accuracy grading into verify_corpus.py as --accuracy
-3ff48c6 Fix TIMING_DIFFERENCE: 0% classification accuracy on genuine timing pairs
-260b35d Fix two bugs found running the system live for the first time
 ```
 
-**307 tests, one failing.** The count rose from 290 because
+**318 tests, all passing, none skipped.** The count rose from 290 because
 `tests/test_integration_db.py` no longer skips — with a reachable PostgreSQL
-its 18 tests run individually instead of the file skipping as one. The
-failure is `test_precision_meets_target`; see §7.
+its 18 tests run individually instead of the file skipping as one — and
+because this session added regression tests for each bug it found. The suite
+has no known-failing gate for the first time; `test_precision_meets_target`
+was the last one and is described in §7.
 
 ---
 
@@ -277,23 +271,25 @@ Classification accuracy, **bootstrap rules**, synthetic corpus, by size:
 
 | Archetype | 800 pairs | 1500 pairs | 5000 pairs |
 |---|---|---|---|
-| `MISSING_REFERENCE_CODE` | 90% | 79% | 66% |
-| `PARTIAL_PAYMENT` | 96% | 92% | 79% |
-| `SPLIT_SETTLEMENT` | 79% | 82% | 71% |
+| `MISSING_REFERENCE_CODE` | 100% | 98% | 88% |
+| `PARTIAL_PAYMENT` | 98% | 96% | 93% |
+| `SPLIT_SETTLEMENT` | 100% | 93% | 89% |
 | `TIMING_DIFFERENCE` | n/a | n/a | n/a |
-| **overall** | **90.00%** | **84.75%** | **72.45%** |
+| **overall** | **99.17%** | **96.00%** | **89.87%** |
 
 `TIMING_DIFFERENCE` reads `n/a` because ~all of its pairs now **auto-match**
 and never reach the queue — that is the P1 fix working, not a gap. Force them
 into the queue with a high `--threshold` and they classify 144/144 correctly.
 
-Read the size columns as a **property of the corpus, not only of the engine**.
-`tools/seed.py` draws descriptions from 15 counterparties × 5 narratives = 75
-combinations, so rows sharing byte-identical text grow linearly with corpus
-size (~11 per description at 800, ~140 at 5000). That crowding is what the
-counterparty blocking in `002783e` attacks, and it is why the 5000-pair column
-improved from 48.72% to 72.45% while the 800-pair column did not move at all.
-A real feed with more distinct narratives would sit nearer the left column.
+These numbers replace an earlier table that read 90% / 85% / 72%. The
+difference is not the engine: `tools/seed.py` drew descriptions from 15
+counterparties × 5 narratives = 75 combinations, so the rows sharing
+byte-identical text grew with the corpus — ~22 per description at 800 pairs,
+~140 at 5,000 — and the matcher's description channel ties at 1.0 on
+identical text. Widening the pools to 40 × 15 = 600 puts 5,000 pairs at ~17
+rows per description, where 800 already sat. What decline remains (99 → 96 →
+90) is the engine's, which is the point: the figures now measure the thing
+under test rather than a property of its test data.
 
 Still the **cold-start bootstrap rules**, not the trained Random Forest
 (`verify_corpus.py` loads a nonexistent model path on purpose); the gate in
@@ -338,32 +334,36 @@ skewed sample. Scored on those same held-out rows the rules manage only
 purpose-built at 50% ambiguous and measures something else entirely. Always
 compare two engines on the same rows, never against a remembered number.
 
-### The one failing gate
+### The precision gate, and how it was closed
 
-`test_precision_meets_target`: 98.95%, gate 99%, **94 of 95 confirmed pairs
-correct**. Facts established rather than assumed:
+It failed for months at 98.95% against a 99% target — 94 of 95 confirmed
+pairs correct, which at n=95 means the gate could only be met by perfection.
+Worth reading before touching `scoring.py`, because the fix changed what the
+engine is willing to auto-confirm.
 
-- **Pre-existing.** Reproduces identically at `e6f02a0`, before any of this
-  week's work — verified in a clean `git worktree`, not inferred.
-- **Deterministic, not flaky.** The corpus is seeded; three consecutive runs
-  give byte-identical output. (Earlier notes in this repo called it flaky.
-  That was wrong.)
-- **Platform-dependent.** It reportedly passed on the author's Windows
-  machine; it fails on Ubuntu 24.04 / Python 3.12.3, most likely a
-  scikit-learn tie-break difference in TF-IDF or DBSCAN.
-- **The gate demands perfection at this n.** With 95 confirmed pairs the only
-  achievable values are 100% (95/95) and 98.95% (94/95) — there is nothing in
-  between, so a "99%" gate is a 100% gate here.
-- **The offending pair is genuinely ambiguous**: two *different* obligations
-  from the same counterparty, identical descriptions (cosine 1.0), amounts
-  0.87% apart, 5 days apart, and the bank side carries no reference code.
-  Confidence 0.86 against a 0.85 threshold.
+The single wrong pair was two *different* obligations from one counterparty:
+identical description text, amounts 0.87% apart, five days apart, no
+reference on the bank side. Scored 1.0 description / 0.96 amount / neutral
+reference = 0.86 against a 0.85 threshold.
 
-A rule of "auto-confirm requires exact amount agreement **or** reference
-agreement" would reject it and take precision to 100%, but it would also stop
-auto-confirming the ~11 genuine partial payments currently matched, costing
-~6 points of recall. That is a **design decision about the engine, not a bug
-fix**, so it was left alone. Decide it deliberately before touching it.
+Description similarity cannot carry that decision. Two transactions from the
+same counterparty share a narrative *by construction*, so a 1.0 there means
+"same counterparty", not "same payment" — and at weight 0.40 it clears the
+line unaided. `ScoredPair.persists` now requires a corroborating identity
+signal as well as the threshold: an exact amount agreement or a matching
+reference. Layer 1 matches are exempt, having agreed on reference, amount and
+date by definition.
+
+Result: 100% precision at **every** threshold from 0.50 to 0.95, 0%
+false-positive rate throughout, coverage steady at 98.50% against its 95%
+target. Cost on the 5,000-pair corpus: 0.12 points of match rate. Most of what
+it now declines is partial payments, which Sec. 10 wants reviewed rather than
+auto-posted — 11 were being auto-confirmed before, 0 after, all nominated
+instead.
+
+An earlier note in this repo estimated the cost at ~6 points of recall. That
+was measured before the corpus vocabulary was widened, when coincidental
+description matches were auto-confirming those 11 partial payments.
 
 ---
 
@@ -389,31 +389,7 @@ intended outcome, because the data to do so does not exist here:
   correctly allowed and denied the right things, but nothing exercises what it
   exists *for* over and above FINANCE_MANAGER.
 
-### P1 — Decide the precision gate deliberately
-
-See §7. Pre-existing, deterministic, one genuinely ambiguous pair out of 95,
-and the "fix" is an engine design decision with a real recall cost. It should
-be *decided*, not left failing indefinitely — a permanently red gate trains
-everyone to ignore the suite.
-
-### P2 — Classification accuracy at scale
-
-72.45% at 5000 pairs against 90.00% at 800. Much of the gap is corpus
-vocabulary (see §7), so the two honest options are different in kind:
-
-- **Widen `tools/seed.py`'s pools** (15 counterparties × 5 narratives → far
-  more). This makes the corpus resemble a real feed rather than flattering the
-  engine, and is the cheaper change. It does not improve the engine.
-- **Keep pushing the engine.** The remaining `MISSING_REFERENCE_CODE` losses
-  are cases where the true leg is unfindable (mangled text, equal amount) and
-  2+ same-counterparty fractions get nominated instead, which the bootstrap
-  rule reads as multiplicity → split. Measured and ruled out already: coverage
-  does **not** separate the two (all four archetypes sit at median 0.83–1.00),
-  and a date-spread cut only separates by reading `seed.py`'s own
-  `randint(0, 4)` back off the generator, which is fitting the corpus rather
-  than the phenomenon. Do not redo those two experiments.
-
-### P3 — Real human feedback
+### P1 — Real human feedback
 
 The loop is proven; the labels are not. Everything the forest knows came from
 an answer-key replay (§7). Genuine reviewer decisions through the dashboard
