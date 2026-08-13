@@ -15,7 +15,7 @@ import { ArcElement, Chart as ChartJS, Legend, Tooltip as ChartTooltip } from 'c
 import { Doughnut } from 'react-chartjs-2'
 
 import Icon from './ui/Icon'
-import { CATEGORY_META, RANGE_PRESETS, categoryMeta } from '../lib/constants'
+import { RANGE_PRESETS, categoryMeta } from '../lib/constants'
 import { compact, integer, percent, shortDate } from '../lib/format'
 
 ChartJS.register(ArcElement, ChartTooltip, Legend)
