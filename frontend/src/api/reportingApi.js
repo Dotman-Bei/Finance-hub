@@ -192,6 +192,18 @@ export const resolveException = (id, { decision, resolution = null, note = '', c
       ).data
   )
 
+/* ── Reconciliation ────────────────────────────────────────────────────── */
+
+/**
+ * Run a matching pass over the unreconciled backlog (§9).
+ *
+ * The gateway forwards this to the matching engine, which owns scoring and
+ * persistence. A pass is CPU-bound and outlives the default request timeout on
+ * a large backlog, so this call carries its own.
+ */
+export const runReconciliation = ({ limit = 2000 } = {}) =>
+  call(async () => (await axiosClient.post('/reconcile', { limit }, { timeout: 180000 })).data)
+
 /* ── Reports ───────────────────────────────────────────────────────────── */
 
 export const getReports = () =>

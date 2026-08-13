@@ -80,6 +80,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 EXCEPTION_HANDLER_URL = os.getenv("EXCEPTION_HANDLER_URL", "http://exception_handler:8003")
+MATCHING_ENGINE_URL = os.getenv("MATCHING_ENGINE_URL", "http://matching_engine:8002")
+
+#: A reconciliation pass is CPU-bound over the whole unreconciled backlog and
+#: routinely outlasts the 15s the shared client allows for a metrics read.
+RECONCILE_TIMEOUT_SECONDS = 180.0
 
 #: Single shared credential for token issue. Not a user store - a real
 #: deployment puts an identity provider in front of this. Documented on the
@@ -116,6 +121,19 @@ class ResolveRequest(BaseModel):
     resolution: dict[str, Any] | None = None
     note: str = ""
     corrected_category: str | None = None
+
+
+class ReconcileRequest(BaseModel):
+    """What the dashboard's Reconcile control sends.
+
+    `transactions` is deliberately absent: the engine accepts an inline batch,
+    but a gateway caller reconciles what has been ingested, and accepting rows
+    over this route would let a browser put unvalidated records in front of the
+    matcher.
+    """
+
+    limit: int = Field(default=2000, gt=0, le=20000)
+    threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────
@@ -405,6 +423,64 @@ async def resolve_exception(
 
     cache().invalidate()
     return response.json()
+
+
+# ── Reconciliation ───────────────────────────────────────────────────────
+
+
+@app.post("/reconcile")
+async def run_reconciliation(
+    request: ReconcileRequest = Body(default_factory=ReconcileRequest),
+    principal: Principal = Depends(requires(Permission.RUN_RECONCILIATION)),
+) -> dict[str, Any]:
+    """Run a matching pass over the unreconciled backlog (Sec. 9).
+
+    Forwarded to Subsystem 1 for the same reason the resolve write is
+    forwarded to Subsystem 3: the matching engine owns scoring, persistence
+    and the reconciliation-run record, and a second implementation here would
+    drift from it.
+
+    Guarded by RUN_RECONCILIATION, so an Auditor is refused by the API rather
+    than merely not being shown the control.
+    """
+    client: httpx.AsyncClient = state["http"]
+    url = f"{MATCHING_ENGINE_URL}/reconcile"
+
+    try:
+        response = await client.post(
+            url,
+            json={
+                "limit": request.limit,
+                "threshold": request.threshold,
+                "persist": True,
+            },
+            timeout=RECONCILE_TIMEOUT_SECONDS,
+        )
+    except httpx.RequestError as exc:
+        # Same rule as the resolve proxy: a 503 is the truth. Reporting a pass
+        # that never ran would show a match rate nothing computed.
+        logger.error("Matching engine unreachable at %s (%s)", url, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Matching engine unreachable at {MATCHING_ENGINE_URL}. "
+            "No reconciliation pass was run.",
+        )
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.json().get("detail"))
+
+    # The pass moves match rate, open exceptions and ledger volume at once, so
+    # every cached KPI is stale the moment it returns.
+    cache().invalidate()
+
+    result = response.json()
+    logger.info(
+        "Reconciliation by %s: %s matched, %s unmatched",
+        principal.subject,
+        result.get("matched"),
+        result.get("unmatched"),
+    )
+    return result
 
 
 # ── Reports ──────────────────────────────────────────────────────────────

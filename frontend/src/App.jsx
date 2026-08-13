@@ -25,6 +25,7 @@ import {
   normalizeException,
   probePrincipal,
   resolveException,
+  runReconciliation,
   signIn,
 } from './api/reportingApi'
 import { ROLES } from './lib/constants'
@@ -267,12 +268,48 @@ export default function App() {
 
   /* ── Actions ────────────────────────────────────────────────────────── */
 
+  /**
+   * Run a real reconciliation pass, then re-read the panels.
+   *
+   * This used to refresh only, while announcing a pass it never ran — the
+   * dashboard reported work the matching engine had not done. The gateway now
+   * forwards to Subsystem 1, so the figures in the toast are the engine's own.
+   */
   const handleRun = useCallback(async () => {
     setRunning(true)
-    push({ tone: 'info', title: 'Reconciliation pass requested', body: 'Refreshing every panel…' })
-    await load({ silent: true })
-    setRunning(false)
-    push({ tone: 'success', title: 'Dashboard up to date', body: 'Metrics re-read from the gateway.' })
+    push({
+      tone: 'info',
+      title: 'Reconciliation pass running',
+      body: 'Matching the unreconciled backlog…',
+    })
+
+    try {
+      const { matched = 0, unmatched = 0, rule_matched: rule = 0, ml_matched: ml = 0 } =
+        await runReconciliation()
+      await load({ silent: true })
+
+      push(
+        matched || unmatched
+          ? {
+              tone: 'success',
+              title: `${matched} matched, ${unmatched} unmatched`,
+              body: `${rule} by rule, ${ml} by the ML layer. New exceptions queue untriaged until the next sweep.`,
+            }
+          : {
+              // Nothing to do is not a failure, but it must not read as one
+              // either: the backlog is empty until fresh records are ingested.
+              tone: 'info',
+              title: 'Nothing left to reconcile',
+              body: 'Every ingested transaction has already been through a pass.',
+            }
+      )
+    } catch (error) {
+      // A failed pass must not be followed by a success toast: the panels
+      // would reload unchanged and read as a pass that matched nothing.
+      push({ tone: 'error', title: 'Reconciliation failed', body: error.message })
+    } finally {
+      setRunning(false)
+    }
   }, [load, push])
 
   /**
