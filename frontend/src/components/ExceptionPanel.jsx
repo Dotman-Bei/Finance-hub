@@ -11,7 +11,14 @@ const SORTS = [
 ]
 
 function ConfidenceBar({ value }) {
-  const pct = Math.round((value ?? 0) * 100)
+  // An untriaged row has no classifier confidence yet. Rendering it as 0%
+  // states the opposite of the truth — that the classifier looked and was
+  // certain of nothing — so say it has not scored it.
+  if (value == null) {
+    return <span className="text-[0.75rem] font-semibold text-on-surface-muted">Not scored yet</span>
+  }
+
+  const pct = Math.round(value * 100)
   const tone = pct >= 85 ? '#0F9E8E' : pct >= 70 ? '#F5A524' : '#E5484D'
 
   return (
@@ -30,7 +37,13 @@ function ResolutionDrawer({ item, canResolve, busy, onDecide }) {
   const [detail, setDetail] = useState(item.suggested_resolution?.detail ?? '')
   const [note, setNote] = useState('')
 
-  const suggestion = item.suggested_resolution
+  // The matching engine opens every exception with a `suggested_resolution`
+  // already populated — its own near-miss data, under a `matching_engine` key,
+  // which Subsystem 3 reads to build features. That object is truthy but
+  // carries no pathway until triage fills one in, so presence alone rendered a
+  // blank suggestion and hid the awaiting-triage message written for this case.
+  // The pathway is what makes it a suggestion.
+  const suggestion = item.suggested_resolution?.pathway ? item.suggested_resolution : null
   const meta = categoryMeta(item.category)
   const settled = item.state === 'RESOLVED' || item.state === 'REJECTED'
 
@@ -80,9 +93,26 @@ function ResolutionDrawer({ item, canResolve, busy, onDecide }) {
             </>
           ) : (
             <p className="mt-2.5 max-w-lg text-[0.8125rem] leading-relaxed text-on-surface-variant">
-              Awaiting triage. The classifier has not produced a suggestion for this item yet — its
-              pathway will be{' '}
-              <span className="font-semibold text-on-surface">{meta.pathway.toLowerCase()}</span>.
+              {item.category ? (
+                <>
+                  Awaiting a suggestion. This item is classified as{' '}
+                  <span className="font-semibold text-on-surface">{meta.label.toLowerCase()}</span>,
+                  so its pathway will be{' '}
+                  <span className="font-semibold text-on-surface">
+                    {meta.pathway.toLowerCase()}
+                  </span>
+                  .
+                </>
+              ) : (
+                // Naming the sweep matters: without it, an untriaged card reads
+                // as something the classifier failed on rather than something it
+                // has not reached yet.
+                <>
+                  Awaiting triage. The exception handler sweeps the open queue every two minutes —
+                  the category, confidence and a suggested pathway appear here once it reaches this
+                  item.
+                </>
+              )}
             </p>
           )}
 
